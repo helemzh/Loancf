@@ -1,0 +1,55 @@
+__pycache__/
+# Operating System Files
+.DS_Store
+Thumbs.db
+
+# IDE and Editor Files
+.vscode/
+.idea/
+*.swp
+*~
+
+# Compiled Source
+*.com
+*.class
+*.dll
+*.exe
+*.o
+*.so
+
+# Packages and Archives
+*.7z
+*.dmg
+*.gz
+*.iso
+*.jar
+*.rar
+*.tar
+*.zip
+
+# Logs and Databases
+*.log
+*.sql
+*.sqlite
+
+# Build Directories
+build/
+dist/
+out/
+
+# Dependency Directories
+node_modules/
+vendor/
+
+# Environment Files
+.env
+.env.local
+.env.*.local
+
+# Temporary Files
+*.tmp
+*.bak
+*.swp
+
+# Other
+*.pdf
