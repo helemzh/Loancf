@@ -60,6 +60,10 @@ class Output:
     px: Yield
     resultDF: pd.DataFrame = field(default_factory=pd.DataFrame) # empty dataframe
     resultPX: float = 0
+    wal_PrinV: float = 0   
+    wal_BalanceDiffV: float = 0
+    wal_InterestV: float = 0
+    wal_cfl: float = 0
 
     def getCashflow(self):
         wac = self.loan.wac
@@ -168,16 +172,31 @@ class Output:
 
         self.resultPX = np.sum(cflV/yV) / b_balanceV[0]
 
-        wal_cfl=calc(cflV) 
+ 
         wal_PrinV=calc(totalPrinV)    
-        wal_InterestV=calc(actInterestV) 
-        wal_BalanceDiffV=calc(BalanceDiffV)     
-
+        wal_BalanceDiffV=calc(BalanceDiffV)
+        wal_InterestV=calc(actInterestV)   
+        wal_cfl=calc(cflV)   
+        
+        self.wal_PrinV=wal_PrinV   
+        self.wal_BalanceDiffV=wal_BalanceDiffV
+        self.wal_InterestV=wal_InterestV
+        self.wal_cfl=wal_cfl   
+        
         return self.resultDF
     
     def getPX(self):
         return self.resultPX
+    def get_wal_PrinV(self):
+        return self.wal_PrinV
     
+    def get_wal_BalanceDiffV(self):
+        return self.wal_BalanceDiffV 
+    def get_wal_cfl(self):
+        return self.wal_cfl
+    
+    def get_wal_InterestV(self):
+        return self.wal_InterestV
 
 if __name__ == '__main__':
     loan = Loan(wac=0.0632, wam=357, pv=100000000)
@@ -189,11 +208,13 @@ if __name__ == '__main__':
     sevVec = np.ones(loan.wam) * 0.2
     #recovery_lagValue = 2
     recovery_lagValue = 0
-    refund_smmVec = np.ones(loan.wam) * 00.5
-    premium_discountValue = 0.1
+ #   refund_smmVec = np.ones(loan.wam) * 00.5
+ #   premium_discountValue = 0.1
+ 
    
-    scenario = Scenario(smmV=smmVec, dqV=dqVec, mdrV=mdrVec, sevV=sevVec, 
-                        recovery_lag=recovery_lagValue, refund_smm = refund_smmVec, premium_discount = premium_discountValue)
+    #scenario = Scenario(smmV=smmVec, dqV=dqVec, mdrV=mdrVec, sevV=sevVec, 
+    #                    recovery_lag=recovery_lagValue, refund_smm = refund_smmVec, premium_discount = premium_discountValue)
+    scenario = Scenario(smmV=smmVec, dqV=dqVec, mdrV=mdrVec, sevV=sevVec, recovery_lag=recovery_lagValue)
     y = Yield(yieldValue=0.055)
     x = Yield(yieldValue=0.0632)
 
