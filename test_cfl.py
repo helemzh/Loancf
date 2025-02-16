@@ -124,6 +124,7 @@ def test_py1():
     print("All tests passed successfully!")
 
 def test_py2():
+    #add wal 
     loan = Loan(wac=0.0632, wam=357, pv=100000000)
 
     # Test cases: (smm, mdr, sev, yield, expected_px)
