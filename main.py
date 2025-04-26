@@ -21,6 +21,9 @@ class Scenario:
     recovery_lag: int=0 # recovery_lag
     refund_smm: np.ndarray =0 # refund_smm, treat as prepay
     premium_discount: float  =1.0 # premium of discount
+    aggMDR: float  =0.0 # mdr value of percentage of B0
+    aggMDR_timingV: np.ndarray = 0 #mdr percentage monthly vector
+
 
     
     
@@ -103,13 +106,21 @@ class Output:
 
         # SMM actual balance
         actualBalanceV = survivorshipV * balancesV # len: wam+1, ending interest bearing balance
-
         # Shifted actual balance (starts at pv)
         b_balanceV= actualBalanceV[:-1] # len: wam
-
         actualBalanceV = actualBalanceV[1:] # len: wam, ending interest bearing balance
+        
+        # adding default_aggMDR
+        #default_aggMDRV = pv * self.scenario.aggMDR * self.scenario.aggMDR_timingV
+        #scaled_default_aggMDRV = default_aggMDRV[:-1]/ actualBalanceV[:-1]
+        #cum_scaled_default_aggMDRV = np.cumsum(scaled_default_aggMDRV)
+        #actualBalanceV[:-1] = actualBalanceV[:-1] * (1 - cum_scaled_default_aggMDRV)
+
+      
+
+        
         #balance difference, balance minus previous month balance, the balance remove last month, previous month balance remove 1st month, then shift to left, 
-        BalanceDiffV = b_balanceV - actualBalanceV
+        BalanceDiffV = b_balanceV - actualBalanceV       
 
         # Actual interest
         actInterestV = b_balanceV * rate * (1-dqV)
@@ -199,21 +210,34 @@ class Output:
         return self.wal_InterestV
 
 if __name__ == '__main__':
-    loan = Loan(wac=0.0632, wam=357, pv=100000000)
+   # loan = Loan(wac=0.0632, wam=357, pv=100000000)
+    loan = Loan(wac=0.06, wam=24, pv=100000)
   
     # Define vectors for the scenario
     smmVec = np.ones(loan.wam) * 0.01
     dqVec = np.ones(loan.wam) * 0.1
-    mdrVec = np.ones(loan.wam) * 0.1
+    #mdrVec = np.ones(loan.wam) * 0.1
+    mdrVec = np.ones(loan.wam) * 0.0
     sevVec = np.ones(loan.wam) * 0.2
+  #  aggMDR_timing_Vec = np.ones(loan.wam) * 0
+  #  aggMDR_timing_Vec=np.insert(aggMDR_timing_Vec,0,0.1)
+   # aggMDR_Value = 0.1
+    #x = np.arange(loan.wam, dtype=float)
+    #np.full_like(x, 0.01)
+    #aggMDR_timing_Vec = np.full_like(x, 0.1)
+ 
+   
+ #   aggMDR_timingv = np.ones(loan.wam) * 0.0
     #recovery_lagValue = 2
     recovery_lagValue = 0
+    
  #   refund_smmVec = np.ones(loan.wam) * 00.5
  #   premium_discountValue = 0.1
  
    
     #scenario = Scenario(smmV=smmVec, dqV=dqVec, mdrV=mdrVec, sevV=sevVec, 
     #                    recovery_lag=recovery_lagValue, refund_smm = refund_smmVec, premium_discount = premium_discountValue)
+    #scenario = Scenario(smmV=smmVec, dqV=dqVec, mdrV=mdrVec, sevV=sevVec, recovery_lag=recovery_lagValue, aggMDR=aggMDR_Value, aggMDR_timingV= aggMDR_timing_Vec)
     scenario = Scenario(smmV=smmVec, dqV=dqVec, mdrV=mdrVec, sevV=sevVec, recovery_lag=recovery_lagValue)
     y = Yield(yieldValue=0.055)
     x = Yield(yieldValue=0.0632)

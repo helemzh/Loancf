@@ -111,7 +111,7 @@ class Output:
 
         # adding default_aggMDR
         default_aggMDRV = b_balanceV * self.scenario.aggMDR * self.scenario.aggMDR_timingV
-        scaled_default_aggMDRV = default_aggMDRV[:-1]/ actualBalanceV[:-1]
+        scaled_default_aggMDRV = b_balanceV/ actualBalanceV[:-1]
         cum_scaled_default_aggMDRV = np.cumsum(scaled_default_aggMDRV)
         actualBalanceV[:-1] = actualBalanceV[:-1] * (1 - cum_scaled_default_aggMDRV)
 
