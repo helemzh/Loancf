@@ -175,6 +175,7 @@ def test_py2():
     print("All tests passed successfully!")   
 
 def test_py3():
+    # Test balance after introducing a new aggmdr
     loan = Loan(wac=0.06, wam=24, pv=100000)
 
     # Test cases: (smm, mdr, sev, yield, expected_px)
@@ -188,7 +189,7 @@ def test_py3():
 
      
     aggMDR_Value = 0.1
-    x = np.arange(loan.wam, dtype=float)
+    x = np.zeros(loan.wam, dtype=float)
     np.full_like(x, 0.01)
     aggMDR_timing_Vec = np.full_like(x, 0.1)
  
@@ -202,13 +203,7 @@ def test_py3():
         mdrVec = np.ones(loan.wam) * mdr
         
         dqV = mdrVec
-        aggMDR_Value = 0.1
-        x = np.arange(loan.wam, dtype=float)
-        np.full_like(x, 0.01)
-        aggMDR_timing_Vec = np.full_like(x, 0.1)       
-        # Create scenario
-        #scenario = Scenario(smm, mdr, sev, 0)  # Assuming DQ is always 0
-        
+       
         scenario = Scenario(smmV=smmVec, dqV=mdrVec, mdrV=mdrVec, sevV=sev, recovery_lag=recovery_lagValue, aggMDR=aggMDR_Value, aggMDR_timingV= aggMDR_timing_Vec)
         
         # Create yield object
@@ -244,7 +239,66 @@ def test_py3():
 
         print("All tests passed successfully!")      
 
+def test_py4():
+    #test wal
+    loan = Loan(wac=0.0632, wam=357, pv=100000000)
+
+    # Test cases: (smm, mdr, sev, yield, expected_px)
+    test_cases = [
+     
+        (0, 0, 0, 0.0632, 1.0000000000, 19.3142148090, 19.3142148090, 11.3140631626, 14.9166666667),
+        (0.01, 0, 0, 0.0632, 1.0000000000, 6.9859506262, 6.9859506262, 6.2378547017, 6.7568208173),
+        (0.01, 0.1, 0, 0.0632, 0.9954659556, 0.7514701165, 0.7514701165, 0.7511465462, 0.7514568528),
+        (0.01, 0.1, 0.2, 0.0632, 0.8232870530, 0.7515413139, 0.7514701165, 0.7511465462, 0.7515217476)
+
+        # Add more test cases here
+    ]
+    recovery_lagValue = 0
+    aggMDR_Value = 0.0
+ 
+    aggMDR_timing_Vec = np.zeros(loan.wam, dtype=float)
+    
+    for smm, mdr, sev, yield_value, expected_px, expected_wal_PrinV, expected_wal_BalanceDiffV, expected_wal_InterestV, expected_wal_cfl  in test_cases:
+        dqV = mdr
+        # Create scenario
+        #scenario = Scenario(smm, mdr, sev, 0)  # Assuming DQ is always 0
+     
+    
+     
+        scenario = Scenario(smmV=smm, dqV=mdr, mdrV=mdr, sevV=sev, recovery_lag=recovery_lagValue, aggMDR=aggMDR_Value, aggMDR_timingV= aggMDR_timing_Vec)
+        
+        
+        # Create yield object
+        y = Yield(yieldValue=yield_value)
+        
+        # Create output object
+        output = Output(loan=loan, scenario=scenario, px=y)
+        
+        df = output.getCashflow()
+        # Get price
+        px = output.getPX()
+
+        wal_PrinV = output.get_wal_PrinV()
+        wal_BalanceDiffV = output.get_wal_BalanceDiffV()
+        wal_InterestV = output.get_wal_InterestV()
+        wal_cfl = output.get_wal_cfl()  
+        
+        # Assert
+        assert np.isclose(px, expected_px, rtol=0, atol=1e-7), \
+            f"Failed for smm={smm}, mdr={mdr}, sev={sev}, yield={yield_value}. Expected {expected_px}, got {px}"
+        
+      
+        assert np.isclose(wal_PrinV, expected_wal_PrinV, rtol=0, atol=1e-8)
+        assert np.isclose(wal_BalanceDiffV, expected_wal_BalanceDiffV, rtol=0, atol=1e-8)
+        assert np.isclose(wal_InterestV, expected_wal_InterestV, rtol=0, atol=1e-8)
+        assert np.isclose(wal_cfl, expected_wal_cfl, rtol=0, atol=1e-8)
+        
+        # assert without wal
+        # assert np.isclose(px, expected_px, rtol=0, atol=1e-7), \
+        #    f"Failed for smm={smm}, mdr={mdr}, sev={sev}, yield={yield_value}. Expected {expected_px}, got {px}"
+
+    print("All tests passed successfully!")   
 if __name__ == '__main__':
   #  test_py1()
-  #  test_py()
     test_py3()
+    test_py4()

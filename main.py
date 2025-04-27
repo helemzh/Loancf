@@ -234,7 +234,8 @@ if __name__ == '__main__':
   #  aggMDR_timing_Vec = np.ones(loan.wam) * 0
   #  aggMDR_timing_Vec=np.insert(aggMDR_timing_Vec,0,0.1)
     aggMDR_Value = 0.1
-    x = np.arange(loan.wam, dtype=float)
+    #x = np.arange(loan.wam, dtype=float)
+    x = np.zeros(loan.wam, dtype=float)
     np.full_like(x, 0.01)
     aggMDR_timing_Vec = np.full_like(x, 0.1)
  
