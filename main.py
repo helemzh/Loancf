@@ -67,6 +67,9 @@ class Output:
     wal_BalanceDiffV: float = 0
     wal_InterestV: float = 0
     wal_cfl: float = 0
+    actualbal0: float = 0
+    actualbal1: float = 0
+    actualbal2: float = 0
 
     def getCashflow(self):
         wac = self.loan.wac
@@ -111,14 +114,14 @@ class Output:
         actualBalanceV = actualBalanceV[1:] # len: wam, ending interest bearing balance
         
         # adding default_aggMDR
-        #default_aggMDRV = pv * self.scenario.aggMDR * self.scenario.aggMDR_timingV
-        #scaled_default_aggMDRV = default_aggMDRV[:-1]/ actualBalanceV[:-1]
-        #cum_scaled_default_aggMDRV = np.cumsum(scaled_default_aggMDRV)
-        #actualBalanceV[:-1] = actualBalanceV[:-1] * (1 - cum_scaled_default_aggMDRV)
-
-      
-
-        
+        default_aggMDRV = pv * self.scenario.aggMDR * self.scenario.aggMDR_timingV
+        scaled_default_aggMDRV = default_aggMDRV[:-1]/ actualBalanceV[:-1]
+        cum_scaled_default_aggMDRV = np.cumsum(scaled_default_aggMDRV)
+        actualBalanceV[:-1] = actualBalanceV[:-1] * (1 - cum_scaled_default_aggMDRV)
+        self.actualbal0 = actualBalanceV[0]
+        self.actualbal1 = actualBalanceV[1]
+        self.actualbal2 = actualBalanceV[2]
+       
         #balance difference, balance minus previous month balance, the balance remove last month, previous month balance remove 1st month, then shift to left, 
         BalanceDiffV = b_balanceV - actualBalanceV       
 
@@ -209,6 +212,15 @@ class Output:
     def get_wal_InterestV(self):
         return self.wal_InterestV
 
+    def get_actualbal0(self):
+        return self.actualbal0   
+ 
+    def get_actualbal1(self):
+        return self.actualbal1 
+    
+    def get_actualbal2(self):
+        return self.actualbal2 
+
 if __name__ == '__main__':
    # loan = Loan(wac=0.0632, wam=357, pv=100000000)
     loan = Loan(wac=0.06, wam=24, pv=100000)
@@ -221,10 +233,10 @@ if __name__ == '__main__':
     sevVec = np.ones(loan.wam) * 0.2
   #  aggMDR_timing_Vec = np.ones(loan.wam) * 0
   #  aggMDR_timing_Vec=np.insert(aggMDR_timing_Vec,0,0.1)
-   # aggMDR_Value = 0.1
-    #x = np.arange(loan.wam, dtype=float)
-    #np.full_like(x, 0.01)
-    #aggMDR_timing_Vec = np.full_like(x, 0.1)
+    aggMDR_Value = 0.1
+    x = np.arange(loan.wam, dtype=float)
+    np.full_like(x, 0.01)
+    aggMDR_timing_Vec = np.full_like(x, 0.1)
  
    
  #   aggMDR_timingv = np.ones(loan.wam) * 0.0
@@ -237,8 +249,8 @@ if __name__ == '__main__':
    
     #scenario = Scenario(smmV=smmVec, dqV=dqVec, mdrV=mdrVec, sevV=sevVec, 
     #                    recovery_lag=recovery_lagValue, refund_smm = refund_smmVec, premium_discount = premium_discountValue)
-    #scenario = Scenario(smmV=smmVec, dqV=dqVec, mdrV=mdrVec, sevV=sevVec, recovery_lag=recovery_lagValue, aggMDR=aggMDR_Value, aggMDR_timingV= aggMDR_timing_Vec)
-    scenario = Scenario(smmV=smmVec, dqV=dqVec, mdrV=mdrVec, sevV=sevVec, recovery_lag=recovery_lagValue)
+    scenario = Scenario(smmV=smmVec, dqV=dqVec, mdrV=mdrVec, sevV=sevVec, recovery_lag=recovery_lagValue, aggMDR=aggMDR_Value, aggMDR_timingV= aggMDR_timing_Vec)
+    #scenario = Scenario(smmV=smmVec, dqV=dqVec, mdrV=mdrVec, sevV=sevVec, recovery_lag=recovery_lagValue)
     y = Yield(yieldValue=0.055)
     x = Yield(yieldValue=0.0632)
 
