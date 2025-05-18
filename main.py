@@ -3,6 +3,8 @@ import pandas as pd
 import numpy_financial as npf
 import numpy as np
 
+cpr2smm = lambda cpr: 1-(1-cpr)**(1/12)
+                       
 @dataclass
 class Loan:
     wac: float  # Weighted Average Coupon (annual interest rate)
@@ -20,13 +22,12 @@ class Scenario:
     sevV: np.ndarray # Severity
     recovery_lag: int=0 # recovery_lag
     refund_smm: np.ndarray =0 # refund_smm, treat as prepay
-    premium_discount: float  =1.0 # premium of discount
+    refund_premium: float  =1.0 # premium of discount
     aggMDR: float  =0.0 # mdr value of percentage of B0
     aggMDR_timingV: np.ndarray = 0 #mdr percentage monthly vector
+    compIntHC: float = 0
+    is_advance: bool = False  #todo: adv | dq+default | dq=default at mon 1to4
 
-
-    
-    
 @dataclass
 class Yield:
     # scenario: Scenario
@@ -43,6 +44,7 @@ def calc(v):
     numerator = np.sum(np.maximum(0.0, v) * (np.arange(1, len(v) + 1) / 12.))
     denominator = np.sum(np.maximum(0.0, v))
     return safedivide(numerator, denominator) 
+
 def shift_elements(arr, num, fill_value):
     result = np.empty_like(arr)
     if num > 0:
@@ -67,9 +69,6 @@ class Output:
     wal_BalanceDiffV: float = 0
     wal_InterestV: float = 0
     wal_cfl: float = 0
-    actualbal0: float = 0
-    actualbal1: float = 0
-    actualbal2: float = 0
 
     def getCashflow(self):
         wac = self.loan.wac
@@ -82,86 +81,63 @@ class Output:
         sevV = self.scenario.sevV
         recovery_lag = self.scenario.recovery_lag
         refund_smm = self.scenario.refund_smm
-        premium_discount = self.scenario.refund_smm
-        dqMdrV = np.maximum(dqV, mdrV)
+        refund_premium = self.scenario.refund_premium
+        dqMdrV = dqV + mdrV  # dqV is additional
 
         yieldValue = self.px.yieldValue
 
         # Amortization
 
         rate = wac / 12
-        X = npf.pmt(rate, wam, pv) # Fixed monthly payment
+        X = -npf.pmt(rate, wam, pv) # Fixed monthly payment
         
         # All vectors are wam length long, except survivorship, balances, and specifically noted balance (len: wam + 1)
         monthsV = np.arange(1, wam + 1)
         balancesV = pv * (1 - (1 + rate) ** -(wam - np.arange(wam + 1))) / (1 - (1 + rate)**-wam) # len: wam+1
-        paymentsV = np.ones(wam) * abs(X)
-        interestsV = balancesV * rate  # len: wam+1
-        principalsV = abs(X) - interestsV  # len: wam+1
-
-        #Scenario
-
-        # adding premium_discount
-        refund_smm = refund_smm * premium_discount
-
-        # Initialize survivorship
-        survivorshipV = np.insert(np.cumprod(np.ones(wam) - smmV - refund_smm - mdrV), 0, 1) # len: wam+1
-
-        # SMM actual balance
-        actualBalanceV = survivorshipV * balancesV # len: wam+1, ending interest bearing balance
-        # Shifted actual balance (starts at pv)
-        b_balanceV= actualBalanceV[:-1] # len: wam
-        actualBalanceV = actualBalanceV[1:] # len: wam, ending interest bearing balance
+        paymentsV = np.ones(wam) * X
+        interestsV = balancesV[:-1] * rate  # len: wam
+        principalsV = X - interestsV  # len: wam
+        paydownV = principalsV / balancesV[:-1]
         
-        # adding default_aggMDR
-        default_aggMDRV = pv * self.scenario.aggMDR * self.scenario.aggMDR_timingV
-        scaled_default_aggMDRV = default_aggMDRV[:-1]/ actualBalanceV[:-1]
-        cum_scaled_default_aggMDRV = np.cumsum(scaled_default_aggMDRV)
-        actualBalanceV[:-1] = actualBalanceV[:-1] * (1 - cum_scaled_default_aggMDRV)
-        self.actualbal0 = actualBalanceV[0]
-        self.actualbal1 = actualBalanceV[1]
-        self.actualbal2 = actualBalanceV[2]
-       
-        #balance difference, balance minus previous month balance, the balance remove last month, previous month balance remove 1st month, then shift to left, 
-        BalanceDiffV = b_balanceV - actualBalanceV       
 
-        # Actual interest
-        actInterestV = b_balanceV * rate * (1-dqV)
+        p_survV = np.cumprod(np.ones(wam) - smmV - refund_smm - mdrV)
+        default_aggMDRV = pv*self.scenario.aggMDR * self.scenario.aggMDR_timingV
+        dqPrin_aggMDRV = paydownV * default_aggMDRV
+        scaled_default_aggMDRV = default_aggMDRV / ( balancesV[:-1] * p_survV )
+        cum_scaled_default_aggMDRV = np.cumsum(scaled_default_aggMDRV)
+        survivorshipV=np.insert(p_survV*(1-cum_scaled_default_aggMDRV),0,1)#N+1
+
+        actualBalanceV = survivorshipV * balancesV # len: wam+1
+        b_balanceV= actualBalanceV[:-1] # len: wam, beginning int bearing bal
+        actualBalanceV = actualBalanceV[1:] # len: wam, ending interest bearing balance
+        balanceDiffV = b_balanceV - actualBalanceV       
 
         # Scheduled, prepayment, default, and total principals
-        schedPrinV = survivorshipV[:-1] * principalsV[:-1] * (1-dqMdrV) # maximum between dq/mdr
-        dqPrinV = survivorshipV[:-1] * principalsV[:-1] * np.maximum(0, dqV - mdrV) # deadbeat balance
+        # deadbeat balance
+        dqPrinV = np.zeros(wam) if self.scenario.is_advance else (
+            survivorshipV[:-1] * principalsV * dqMdrV + dqPrin_aggMDRV )
+        schedPrinV = survivorshipV[:-1] * principalsV - dqPrinV
         prepayPrinV = survivorshipV[:-1] * balancesV[1:] * smmV
-        defaultPrinV = b_balanceV * mdrV
-        # new defaultPrinV = total default times default_timingV
-        #Total_default_p * pv (B0), Total_default= otal_default_p * pv (B0),
-        # defaultPrinV need shift recovery_lag, defaultPrinV=defaultPrinV[:reco]
+        defaultV = b_balanceV * mdrV + default_aggMDRV
         totalEndingBalV = actualBalanceV + dqPrinV 
         totalBeginningBalV = b_balanceV.copy()
         totalBeginningBalV[1:] = dqPrinV[:-1]
 
         # Losses, recoveries, and writedowns
-        lossV = defaultPrinV * sevV
-        recoveryV = defaultPrinV - lossV
-        #shift recovery_lag
+        writedownV = defaultV * sevV
+        recoveryV = defaultV - writedownV
         recoveryV = shift_elements(recoveryV, recovery_lag, 0)
-       # Test shift_elements(arr, 2, 0)
-       #arr = np.array([1, 2, 3, 4, 5, 6])
-       # shifted_arr = shift_elements(arr, 2, 0)
-       #print(shifted_arr)     
         
-        writedownV = b_balanceV * sevV * mdrV
-
         # Total principal and cash flow
+        refundPrinV = survivorshipV[:-1] * balancesV[1:] * refund_smm
         totalPrinV = schedPrinV + prepayPrinV + recoveryV
-        # Recovery Lag section
-        #  totalPrinV = schedPrinV + prepayPrinV 
-        # length totalPrinV by recovery_lag months
-        #  totalPrinV[recovery_lag:] += recoveryV
-
-        # refund section
-        # refundPrinV = survivorshipV[:-1] * balancesV[1:] * refund_smmV
-        # totalPrinV = schedPrinV + prepayPrinV  + refundPrinV * refund_premium
+        compIntV = prepayPrinV * rate * self.scenario.compIntHC
+        refundIntV = refundPrinV * rate
+        
+            
+        actInterestV = rate*b_balanceV if self.scenario.is_advance else (
+            rate*(b_balanceV*(1-dqMdrV) - default_aggMDRV) - compIntV)
+        actInterestV -= refundIntV
         cflV = totalPrinV + actInterestV
 
         # Create scenario DataFrame
@@ -170,7 +146,7 @@ class Output:
             "Prin": totalPrinV,
             "SchedPrin": schedPrinV,
             "Prepay Prin": prepayPrinV,
-            "Default": defaultPrinV,
+            "Default": defaultV,
             "Writedown": writedownV,
             "Recovery": recoveryV,
             "Interest": actInterestV,
@@ -183,12 +159,13 @@ class Output:
 
         #### LIFT INTO FUNCTION AND PASS IN CASHFLOW #####
         yV = (1 + yieldValue/12)**monthsV
+        refundCflV = refundPrinV * refund_premium
 
-        self.resultPX = np.sum(cflV/yV) / b_balanceV[0]
+        self.resultPX = np.sum(cflV/yV) / (b_balanceV[0]-np.sum(refundPrinV/yV))
 
  
         wal_PrinV=calc(totalPrinV)    
-        wal_BalanceDiffV=calc(BalanceDiffV)
+        wal_BalanceDiffV=calc(balanceDiffV)
         wal_InterestV=calc(actInterestV)   
         wal_cfl=calc(cflV)   
         
@@ -212,15 +189,6 @@ class Output:
     def get_wal_InterestV(self):
         return self.wal_InterestV
 
-    def get_actualbal0(self):
-        return self.actualbal0   
- 
-    def get_actualbal1(self):
-        return self.actualbal1 
-    
-    def get_actualbal2(self):
-        return self.actualbal2 
-
 if __name__ == '__main__':
    # loan = Loan(wac=0.0632, wam=357, pv=100000000)
     loan = Loan(wac=0.06, wam=24, pv=100000)
@@ -239,14 +207,7 @@ if __name__ == '__main__':
     np.full_like(x, 0.01)
     aggMDR_timing_Vec = np.full_like(x, 0.1)
  
-   
- #   aggMDR_timingv = np.ones(loan.wam) * 0.0
-    #recovery_lagValue = 2
     recovery_lagValue = 0
-    
- #   refund_smmVec = np.ones(loan.wam) * 00.5
- #   premium_discountValue = 0.1
- 
    
     #scenario = Scenario(smmV=smmVec, dqV=dqVec, mdrV=mdrVec, sevV=sevVec, 
     #                    recovery_lag=recovery_lagValue, refund_smm = refund_smmVec, premium_discount = premium_discountValue)
