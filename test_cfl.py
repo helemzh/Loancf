@@ -1,3 +1,6 @@
+# Copyright (c) 2024 Helen Zhang <zhangdhelen@gmail.com>
+# Distributed under the BSD 3-Clause License
+
 import pytest
 import numpy as np
 from main import Loan, Yield, Output, Scenario, cpr2smm

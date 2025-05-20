@@ -1,3 +1,6 @@
+# Copyright (c) 2024 Helen Zhang <zhangdhelen@gmail.com>
+# Distributed under the BSD 3-Clause License
+
 from dataclasses import dataclass, field
 import pandas as pd
 import numpy_financial as npf
