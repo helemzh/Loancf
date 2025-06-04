@@ -6,6 +6,8 @@ import pandas as pd
 import numpy_financial as npf
 import numpy as np
 
+# pd.set_option('display.precision', 9) #set pandas display precision
+
 cpr2smm = lambda cpr: 1-(1-cpr)**(1/12)
                        
 @dataclass
@@ -29,6 +31,7 @@ class Scenario:
     aggMDR: float  =0.0 # mdr value of percentage of B0
     aggMDR_timingV: np.ndarray = 0 #mdr percentage monthly vector
     compIntHC: float = 0
+    servicing_fee: float = 0.0
     is_advance: bool = False  #todo: adv | dq+default | dq=default at mon 1to4
 
 @dataclass
@@ -83,6 +86,7 @@ class Output:
         mdrV = self.scenario.mdrV
         sevV = self.scenario.sevV
         recovery_lag = self.scenario.recovery_lag
+        period_with_lag = wam + recovery_lag # adjust number of rows to add lag
         refund_smm = self.scenario.refund_smm
         refund_premium = self.scenario.refund_premium
         dqMdrV = dqV + mdrV  # dqV is additional
@@ -127,44 +131,53 @@ class Output:
         totalBeginningBalV[1:] = dqPrinV[:-1]
 
         # Losses, recoveries, and writedowns
-        writedownV = defaultV * sevV
-        recoveryV = defaultV - writedownV
-        recoveryV = shift_elements(recoveryV, recovery_lag, 0)
+        writedownV = defaultV #* sevV
+        recoveryV = defaultV - writedownV # old calculation
+        recoveryV = shift_elements(recoveryV, recovery_lag, 0) # old calculation
+        writedownV = shift_elements(pad_zeros(writedownV, period_with_lag), recovery_lag, 0) # added writedownV shift
+        recoveryV = writedownV * (1-pad_zeros(sevV, period_with_lag, pad_value='last')) # new calculation
         
         # Total principal and cash flow
         refundPrinV = survivorshipV[:-1] * balancesV[1:] * refund_smm
-        totalPrinV = schedPrinV + prepayPrinV + recoveryV
+        totalPrinV = pad_zeros(schedPrinV, period_with_lag) + pad_zeros(prepayPrinV, period_with_lag) + recoveryV # padded for recovery lag
         compIntV = prepayPrinV * rate * self.scenario.compIntHC
         refundIntV = refundPrinV * rate
-        
+        prepayPrinV = survivorshipV[:-1] * balancesV[1:] * smmV + refundPrinV #added refundPrin
+
+        # Work in Progress: Servicing Fee
+        servicingFee_rate = self.scenario.servicing_fee / 12
+        servicingFee_beg = b_balanceV * servicingFee_rate #uses beginning balance
+        servicingFee_avg = (b_balanceV + actualBalanceV) / 2 * servicingFee_rate #avg balance        
             
         actInterestV = rate*b_balanceV if self.scenario.is_advance else (
             rate*(b_balanceV*(1-dqMdrV) - default_aggMDRV) - compIntV)
         actInterestV -= refundIntV
-        cflV = totalPrinV + actInterestV
-
+        cflV = totalPrinV + pad_zeros(actInterestV, period_with_lag) #- servicingFee_avg (servicing fee df len needs to be matched) # change to servicingFee_beg if needed, padded for recovery lag
+        
         # Create scenario DataFrame
         self.resultDF = pd.DataFrame({
             "Months": monthsV,
-            "Prin": totalPrinV,
+            "Prin": totalPrinV[:wam],
             "SchedPrin": schedPrinV,
             "Prepay Prin": prepayPrinV,
             "Default": defaultV,
-            "Writedown": writedownV,
-            "Recovery": recoveryV,
+            "Writedown": writedownV[:wam],
+            "Recovery": recoveryV[:wam],
             "Interest": actInterestV,
+            "ServicingFeeB": servicingFee_beg,
+            "ServicingFeeAvg": servicingFee_avg, # may need to add default (tbl uses total bal)
             "Beginning Balance": b_balanceV,
             "Balance": actualBalanceV,
-            "CFL": cflV,
+            "CFL": cflV[:wam],
         })
 
         # Yield/PX
 
         #### LIFT INTO FUNCTION AND PASS IN CASHFLOW #####
-        yV = (1 + yieldValue/12)**monthsV
+        yV = (1 + yieldValue/12)**np.arange(1, wam + 1 + recovery_lag) # len of months + recovery_lag
         refundCflV = refundPrinV * refund_premium
 
-        self.resultPX = np.sum(cflV/yV) / (b_balanceV[0]-np.sum(refundPrinV/yV))
+        self.resultPX = np.sum(cflV/yV) / (b_balanceV[0]-np.sum(pad_zeros(refundPrinV, period_with_lag)/yV))
 
  
         wal_PrinV=calc(totalPrinV)    
@@ -191,6 +204,16 @@ class Output:
     
     def get_wal_InterestV(self):
         return self.wal_InterestV
+    
+# Pad vectors to account for recovery lag
+def pad_zeros(vec, n, pad_value=0):
+    if len(vec) < n:
+        if pad_value == 'last':
+            pad_val = vec[-1]
+        else:
+            pad_val = pad_value
+        return np.concatenate([vec, np.full(n - len(vec), pad_val)])
+    return vec
 
 if __name__ == '__main__':
    # loan = Loan(wac=0.0632, wam=357, pv=100000000)

@@ -126,11 +126,42 @@ def test_st():
         print(df, px)
         assert np.isclose(px, px_expe, rtol=0, atol=1e-12), \
             f'Actual v expected: {px} v {px_expe} for {att}={val}'
+        
+def test_st2():
+    """Short-dated loan"""
+    wam = 12
+    loan = Loan(wac=0.30, wam=wam, pv=100) # WAC is APR
+    aggMDR_timingV = .01*np.array([23, 10, 10, 10, 10, 10, 8, 7, 5, 4, 2, 1]) #loss timing
+    assert np.isclose(aggMDR_timingV.sum(), 1.0, rtol=0, atol=1e-12)
+    
+    scenario = Scenario(
+        smmV = cpr2smm(np.array([.35] * wam)), # curtailment CPR to SMM
+        dqV=np.full(wam, 0),
+        mdrV= 0,
+        sevV=np.full(wam, 0.94),
+        aggMDR=.03, aggMDR_timingV=aggMDR_timingV, #aggMDR is CGL
+        refund_smm=cpr2smm(.01*np.array([74, 15, 5, 3, 2, 1] + [0]*(wam-6))), #refund cpr to smm   
+        compIntHC= .2, # prepayment haircut,
+        servicing_fee=0
+    )
+    y = Yield(yieldValue=0.1)
+
+    for att, val, px_expe in [
+                              ('recovery_lag', 4, 1.05944025156667),
+                         ]:
+        setattr(scenario, att, val)
+        output = Output(loan=loan, scenario=scenario, px=y)
+        df = output.getCashflow()
+        px = output.getPX()
+        print(df, px)
+        assert np.isclose(px, px_expe, rtol=0, atol=1e-12), \
+            f'Actual v expected: {px} v {px_expe} for {att}={val}'
 
 
 if __name__ == '__main__':
     while(1):
-        test_st()
+        test_st2()
+        # test_st()
         break
     
         test_py1()
