@@ -142,12 +142,13 @@ def test_st2():
         aggMDR=.03, aggMDR_timingV=aggMDR_timingV, #aggMDR is CGL
         refund_smm=cpr2smm(.01*np.array([74, 15, 5, 3, 2, 1] + [0]*(wam-6))), #refund cpr to smm   
         compIntHC= .2, # prepayment haircut,
-        servicing_fee=0
+        servicing_fee=0.02,
+        servicing_fee_method='avg'
     )
     y = Yield(yieldValue=0.1)
 
     for att, val, px_expe in [
-                              ('recovery_lag', 4, 1.05944025156667),
+                              ('recovery_lag', 4, 1.05063070588810),
                          ]:
         setattr(scenario, att, val)
         output = Output(loan=loan, scenario=scenario, px=y)
@@ -161,7 +162,7 @@ def test_st2():
 if __name__ == '__main__':
     while(1):
         test_st2()
-        # test_st()
+        # test_st2()
         break
     
         test_py1()
