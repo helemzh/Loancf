@@ -6,6 +6,7 @@ import pandas as pd
 import numpy_financial as npf
 import numpy as np
 import torch
+from scipy.optimize import brentq
 
 # --- Utility Functions ---
 
@@ -65,7 +66,7 @@ class Scenario:
 
 @dataclass
 class Input:
-    yieldValue: float
+    yieldValue: float=0.0
     fullpx: float=0.0
 
 
@@ -164,6 +165,8 @@ class Loan:
         b_balanceV = pad_zeros(b_balanceV, period_with_lag)
         actualBalanceV = pad_zeros(actualBalanceV, period_with_lag)
 
+        print(X)
+
         # Create scenario DataFrame
         df = pd.DataFrame({
             "Months": monthsV,
@@ -193,17 +196,32 @@ class Loan:
         px = np.sum((cfV - servicingFeeV) / yV) / (self.pv - np.sum(refundPrinV / yV))
         return px
 
-    ###### TO DO ######
     def p2y(self, scenario, input): # price to yield
-        return
+        price_target = input.fullpx
 
-class TestTensor(torch.nn.Module):
-    def forward(self, tensor):
-        return tensor + 2
+        def price_for_yield(y):
+            class Helper:
+                def __init__(self, yieldValue):
+                    self.yieldValue = yieldValue
+            input_obj = Helper(y)
+            return self.y2p(scenario, input_obj) - price_target
+
+        yield_solution = brentq(price_for_yield, 0.0001, 1.0)
+        return yield_solution
+
+class LoanAmort(torch.nn.Module): # takes in 2d tensor of n_loan, goes down nx3 each row is a loan
+    def __init__(self, shape=(3, 3, 3)): 
+        super(LoanAmort, self).__init__()
+        self.tensor = torch.randn(shape)  # Initialize with random values
+        self.shape = shape
+    def forward(self): # takes in scenario tensor
+        result = self.tensor + 1
+        return result
 
 if __name__ == '__main__':
 
     # Test 3D tensor
-    model = TestTensor()
-    output = model(torch.ones((5, 20, 10)))
-    print(output)
+    model = LoanAmort()
+    result = model()
+
+    print(result)
