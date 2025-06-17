@@ -165,8 +165,6 @@ class Loan:
         b_balanceV = pad_zeros(b_balanceV, period_with_lag)
         actualBalanceV = pad_zeros(actualBalanceV, period_with_lag)
 
-        print(X)
-
         # Create scenario DataFrame
         df = pd.DataFrame({
             "Months": monthsV,
