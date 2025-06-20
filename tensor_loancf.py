@@ -4,7 +4,9 @@
 import numpy_financial as npf
 import numpy as np
 import torch
-from scipy.optimize import brentq
+from scipy.optimize import newton
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def cpr2smm(cpr):
@@ -330,31 +332,179 @@ def y2p_tensor(loans_tensor, scenarios_tensor, yield_tensor):
     px = (numer / denom)
     return px
 
-def p2y_tensor(loans_tensor, scenarios_tensor, price_tensor, y_min=0.0001, y_max=1.0, tol=1e-6, max_iter=100):
+def p2y_tensor(loans_tensor, scenarios_tensor, price_tensor, y_init=.08):
     """
-    Vectorized price-to-yield for all loans and scenarios using bisection.
-    loans_tensor: [n_loans, 3]
+    loans_tensor: [n_loans, 3] (wac, wam, pv)
     scenarios_tensor: [n_scenarios, n_vectors, max_wam]
     price_tensor: [n_loans, n_scenarios]
     Returns: yield_tensor [n_loans, n_scenarios]
     """
     n_loans, n_scenarios = price_tensor.shape
-    device = loans_tensor.device
+    model = LoanAmort(loans_tensor)
+    result_tensor, feature_names = model(scenarios_tensor)  # [n_loans, n_scenarios, periods, n_features]
+    periods = result_tensor.shape[2]
+    months = np.arange(1, periods + 1)
 
-    # Initial bounds
-    y_lo = torch.full((n_loans, n_scenarios), y_min, device=device)
-    y_hi = torch.full((n_loans, n_scenarios), y_max, device=device)
+    cfV = result_tensor[..., feature_names.index("CFL")].cpu().numpy()
+    servicingFeeV = result_tensor[..., feature_names.index("Servicing Fee")].cpu().numpy()
+    refundPrinV = result_tensor[..., feature_names.index("Refund Prin")].cpu().numpy()
+    pv = loans_tensor[:, 2].cpu().numpy()
 
-    for _ in range(max_iter):
-        y_mid = (y_lo + y_hi) / 2
-        px_mid = y2p_tensor(loans_tensor, scenarios_tensor, y_mid)
-        above = px_mid > price_tensor
-        y_lo = torch.where(above, y_mid, y_lo)
-        y_hi = torch.where(~above, y_mid, y_hi)
-        if torch.max(torch.abs(px_mid - price_tensor)) < tol:
-            break
-    return y_mid
+    yield_tensor = np.zeros((n_loans, n_scenarios))
 
+    for i in range(n_loans):
+        for j in range(n_scenarios):
+            cf = cfV[i, j]
+            fee = servicingFeeV[i, j]
+            refund = refundPrinV[i, j]
+            pv_ = float(pv[i])
+            target_price = float(price_tensor[i, j].cpu().numpy())
+
+            def price_func(y):
+                yV = (1 + y / 12) ** months
+                numer = np.sum((cf - fee) / yV)
+                denom = pv_ - np.sum(refund / yV)
+                return numer / denom - target_price
+
+            try:
+                y = newton(price_func, y_init) # initial guess yield
+            except Exception:
+                y = np.nan
+            yield_tensor[i, j] = y
+
+    return torch.tensor(yield_tensor, dtype=loans_tensor.dtype, device=loans_tensor.device)
+
+def yield_price_aggregation(
+    loans_tensor,
+    scenarios_tensor,
+    value_tensor,        # yield_tensor for y2p, price_tensor for p2y
+    function='y2p',      # 'y2p' or 'p2y'
+    method='pool',       # 'pool' or 'loan'
+    y_init=0.05
+):
+    """
+    loans_tensor: [n_loans, 3]
+    scenarios_tensor: [n_scenarios, n_vectors, max_wam]
+    value_tensor: [n_loans, n_scenarios] or [n_scenarios] or [n_loans] (yield or price)
+    function: 'y2p' or 'p2y'
+    method: 'pool' or 'loan'
+    y_init: initial guess for yield (for p2y)
+    Returns: [n_scenarios] for pool, [n_loans] for loan (1-to-1)
+    """
+    model = LoanAmort(loans_tensor)
+    result_tensor, feature_names = model(scenarios_tensor)  # [n_loans, n_scenarios, periods, n_features]
+    cfV = result_tensor[..., feature_names.index("CFL")]
+    servicingFeeV = result_tensor[..., feature_names.index("Servicing Fee")]
+    refundPrinV = result_tensor[..., feature_names.index("Refund Prin")]
+    pv = loans_tensor[:, 2]
+
+    n_loans, n_scenarios, periods = cfV.shape
+
+    if method == 'loan':
+        # 1-to-1 mapping: n_loans == n_scenarios
+        if n_loans != n_scenarios:
+            raise ValueError("For loan method, n_loans must equal n_scenarios for 1-to-1 mapping.")
+        idx = torch.arange(n_loans, device=cfV.device)
+        cfV_diag = cfV[idx, idx, :]                # [n_loans, periods]
+        servicingFeeV_diag = servicingFeeV[idx, idx, :]
+        refundPrinV_diag = refundPrinV[idx, idx, :]
+        pv_diag = pv[idx]
+        periods = cfV_diag.shape[1]
+        months = torch.arange(1, periods + 1, device=cfV_diag.device).unsqueeze(0)  # [1, periods]
+
+        if function == 'y2p':
+            yield_vec = value_tensor.flatten()
+            if yield_vec.shape[0] != n_loans:
+                raise ValueError("For loan y2p, value_tensor must have length equal to number of loans.")
+            yV = (1 + yield_vec.unsqueeze(1) / 12) ** months  # [n_loans, periods]
+            numer = torch.sum((cfV_diag - servicingFeeV_diag) / yV, dim=1)  # [n_loans]
+            denom = pv_diag - torch.sum(refundPrinV_diag / yV, dim=1)       # [n_loans]
+            price = numer / denom
+            return price
+
+        elif function == 'p2y':
+            price_vec = value_tensor.flatten()
+            if price_vec.shape[0] != n_loans:
+                raise ValueError("For loan p2y, value_tensor must have length equal to number of loans.")
+            yield_vec = np.zeros(n_loans)
+            months_np = np.arange(1, periods + 1)
+            cfV_np = cfV_diag.cpu().numpy()
+            fee_np = servicingFeeV_diag.cpu().numpy()
+            refund_np = refundPrinV_diag.cpu().numpy()
+            pv_np = pv_diag.cpu().numpy()
+            price_np = price_vec.cpu().numpy()
+            for i in range(n_loans):
+                cf = np.nan_to_num(cfV_np[i], nan=0.0)
+                fee = np.nan_to_num(fee_np[i], nan=0.0)
+                refund = np.nan_to_num(refund_np[i], nan=0.0)
+                pv_ = float(pv_np[i])
+                target_price = float(price_np[i])
+                def price_func(y):
+                    yV = (1 + y / 12) ** months_np
+                    numer = np.sum((cf - fee) / yV)
+                    denom = pv_ - np.sum(refund / yV)
+                    return numer / denom - target_price
+                try:
+                    y = newton(price_func, y_init)
+                except Exception:
+                    y = np.nan
+                yield_vec[i] = y
+            return torch.tensor(yield_vec, dtype=loans_tensor.dtype, device=loans_tensor.device)
+        else:
+            raise ValueError("function must be 'y2p' or 'p2y'")
+
+    elif method == 'pool':
+        # Aggregate all loans per scenario
+        agg_cfV = cfV.sum(dim=0)                # [n_scenarios, periods]
+        agg_servicingFeeV = servicingFeeV.sum(dim=0)
+        agg_refundPrinV = refundPrinV.sum(dim=0)
+        agg_pv = pv.sum().expand(n_scenarios)   # [n_scenarios]
+        periods = agg_cfV.shape[1]
+        months = torch.arange(1, periods + 1, device=agg_cfV.device).unsqueeze(0)  # [1, periods]
+
+        if function == 'y2p':
+            yield_vec = value_tensor.flatten()
+            if yield_vec.shape[0] == 1:
+                yield_vec = yield_vec.expand(n_scenarios)
+            if yield_vec.shape[0] != n_scenarios:
+                raise ValueError("For pool y2p, value_tensor must have length equal to number of scenarios or 1.")
+            yV = (1 + yield_vec.unsqueeze(1) / 12) ** months  # [n_scenarios, periods]
+            numer = torch.sum((agg_cfV - agg_servicingFeeV) / yV, dim=1)  # [n_scenarios]
+            denom = agg_pv - torch.sum(agg_refundPrinV / yV, dim=1)       # [n_scenarios]
+            price = numer / denom
+            return price
+
+        elif function == 'p2y':
+            price_vec = value_tensor.flatten()
+            if price_vec.shape[0] == 1:
+                price_vec = price_vec.expand(n_scenarios)
+            if price_vec.shape[0] != n_scenarios:
+                raise ValueError("For pool p2y, value_tensor must have length equal to number of scenarios or 1.")
+            yield_vec = np.zeros(n_scenarios)
+            months_np = np.arange(1, periods + 1)
+            for i in range(n_scenarios):
+                cf = np.nan_to_num(agg_cfV[i].cpu().numpy(), nan=0.0)
+                fee = np.nan_to_num(agg_servicingFeeV[i].cpu().numpy(), nan=0.0)
+                refund = np.nan_to_num(agg_refundPrinV[i].cpu().numpy(), nan=0.0)
+                pv_ = float(agg_pv[i].cpu().numpy())
+                target_price = float(price_vec[i])
+                def price_func(y):
+                    yV = (1 + y / 12) ** months_np
+                    numer = np.sum((cf - fee) / yV)
+                    denom = pv_ - np.sum(refund / yV)
+                    return numer / denom - target_price
+                try:
+                    y = newton(price_func, y_init)
+                except Exception:
+                    y = np.nan
+                yield_vec[i] = y
+            return torch.tensor(yield_vec, dtype=loans_tensor.dtype, device=loans_tensor.device)
+        else:
+            raise ValueError("function must be 'y2p' or 'p2y'")
+
+    else:
+        raise ValueError("method must be 'pool' or 'loan'")
+        
 
 # Scenario tensor index constants
 SMM_I = 0
@@ -378,6 +528,8 @@ if __name__ == '__main__':
     loans_tensor = torch.tensor([
         [0.3, 12, 100],
         [0.3, 14, 100],
+        [.13175, 240, 61750],
+        # [.1, 20, 100000]
     ], dtype=torch.float32)
 
     max_wam = int(loans_tensor[:, 1].max().item())
@@ -405,37 +557,45 @@ if __name__ == '__main__':
     scenarios_tensor[0, REFUND_PREMIUM_I, 0] = 1.0
 
     ### Scenario 1 ###
-    refund_smm = cpr2smm(.01 * torch.tensor([74, 15, 5, 3, 2, 1])) # input refund_smm values
-    scenarios_tensor[1, REFUND_SMM_I, :] = 0 # first fill 0
-    scenarios_tensor[1, REFUND_SMM_I, :len(refund_smm)] = refund_smm
-    aggMDR_timing = .01 * torch.tensor([23,10,10,10,10,10,8,7,5,4,2,1]) # input aggMDR_timing values
+    scenarios_tensor[1, REFUND_SMM_I, :] = 0
     scenarios_tensor[1, AGGMDR_TIMING_I, :] = 0
-    scenarios_tensor[1, AGGMDR_TIMING_I, :len(aggMDR_timing)] = aggMDR_timing
-    scenarios_tensor[1, SMM_I, :] = cpr2smm(0.35)
+    scenarios_tensor[1, SMM_I, :] = cpr2smm(0.15)
     scenarios_tensor[1, DQ_I, :] = 0
     scenarios_tensor[1, MDR_I, :] = 0
-    scenarios_tensor[1, SEV_I, :] = 0.94
-    scenarios_tensor[1, AGGMDR_I, 0] = 0.03
-    scenarios_tensor[1, COMPINTHC_I, 0] = 0.2
-    scenarios_tensor[1, SERVICING_FEE_I, 0] = 0.02
-    scenarios_tensor[1, RECOVERY_LAG_I, 0] = 3
+    scenarios_tensor[1, SEV_I, :] = 0
+    scenarios_tensor[1, AGGMDR_I, 0] = 0
+    scenarios_tensor[1, COMPINTHC_I, 0] = 0
+    scenarios_tensor[1, SERVICING_FEE_I, 0] = 0
+    scenarios_tensor[1, RECOVERY_LAG_I, 0] = 0
     scenarios_tensor[1, REFUND_PREMIUM_I, 0] = 1.0
 
     model = LoanAmort(loans_tensor)
     result_tensor, feature_names = model(scenarios_tensor)
 
     print("Result shape:", result_tensor.shape)  # [n_loans, n_scenarios, max_wam+lag, n_features]
-    print(f"Result for loan 0, scenario 0:\n\t{feature_names}\n{result_tensor[0, 0]}")
-    print(f"Result for loan 0, scenario 1:\n\t{feature_names}\n{result_tensor[0, 1]}")
-    print(f"Result for loan 1, scenario 0:\n\t{feature_names}\n{result_tensor[1, 0]}")
-    print(f"Result for loan 1, scenario 1:\n\t{feature_names}\n{result_tensor[1, 1]}")
+    # print(f"Result for loan 0, scenario 0:\n\t{feature_names}\n{result_tensor[0, 0]}")
+    # print(f"Result for loan 2, scenario 0:\n\t{feature_names}\n{result_tensor[2, 1]}")
 
-    # Suppose you want price for a given yield:
-    yield_tensor = torch.full((n_loans, n_scenarios), 0.1, device=loans_tensor.device)
+    ''' Price and Yield for each loan/scenario
+    yield_tensor = torch.full((n_loans, n_scenarios), 0.0667, device=loans_tensor.device)
     price_tensor = y2p_tensor(loans_tensor, scenarios_tensor, yield_tensor)
 
-    # Or, want yield for a given price:
     target_price = torch.full((n_loans, n_scenarios), 1.061202911, device=loans_tensor.device) #1.0506307058881
     yield_tensor = p2y_tensor(loans_tensor, scenarios_tensor, target_price)
 
     print(f"price{price_tensor}, \nyield{yield_tensor}")
+    '''
+
+    # Example yield-price aggregation, when loan method: set tensor size as (n_loans,) pool method: (n_scenarios,)
+    yield_tensor = torch.full((n_scenarios,), 0.10, device=loans_tensor.device)
+    price_tensor = yield_price_aggregation(
+        loans_tensor, scenarios_tensor, yield_tensor, function='y2p', method='pool'
+    )
+    print(f"Aggregated price: {price_tensor}")
+
+
+    target_price = torch.full((n_scenarios,), 1.0506307058881, device=loans_tensor.device)
+    yield_tensor = yield_price_aggregation(
+        loans_tensor, scenarios_tensor, target_price, function='p2y', method='pool'
+    )   
+    print(f"Aggregated yield: {yield_tensor}")
