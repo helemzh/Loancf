@@ -131,7 +131,8 @@ def test_st():
 def test_st2():
     """Short-dated loan"""
     wam = 12
-    loan = Loan(wac=0.30, wam=wam, pv=100) # WAC is APR
+    rate_redV = np.array([.0001] * 6 + [.0002] * 6)
+    loan = Loan(wac=0.30, wam=wam, pv=100, rate_redV=rate_redV) # WAC is APR
 
     aggMDR_timingV = .01*np.array([23, 10, 10, 10, 10, 10, 8, 7, 5, 4, 2, 1]) #loss timing
     assert np.isclose(aggMDR_timingV.sum(), 1.0, rtol=0, atol=1e-12)
@@ -150,7 +151,7 @@ def test_st2():
     )
     y = Input(yieldValue=0.1)
 
-    for att, val, px_expe in [('recovery_lag', 0, 1.05063070588810)]:
+    for att, val, px_expe in [('recovery_lag', 4, 1.05063070588810)]:
         setattr(scenario, att, val)
         df = loan.getCashflow(scenario)
         px = loan.y2p(scenario, y)

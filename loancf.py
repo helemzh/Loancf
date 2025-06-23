@@ -53,11 +53,11 @@ class Scenario:
     dqV: np.ndarray # Delinquency rate
     mdrV: np.ndarray # Monthly Default Rate
     sevV: np.ndarray # Severity
+    refund_smm: np.ndarray # treat as prepay
+    aggMDR_timingV: np.ndarray # mdr percentage monthly vector
     recovery_lag: int=0
-    refund_smm: np.ndarray=0 # treat as prepay
     refund_premium: float=1.0 # premium of discount
     aggMDR: float=0.0 # mdr value of percentage of B0
-    aggMDR_timingV: np.ndarray=0 # mdr percentage monthly vector
     compIntHC: float=0.0 # Haircut
     servicing_fee: float=0.0
     is_advance: bool=False  #todo: adv | dq+default | dq=default at mon 1to4
@@ -75,11 +75,13 @@ class Loan:
     wac: float  # Weighted Average Coupon (annual interest rate)
     wam: int    # Weighted Average Maturity (in months)
     pv: float   # Present Value (loan amount), pv is B0
+    rate_redV: np.ndarray
 
     def getCashflow(self, scenario):
         wac = self.wac
         wam = self.wam
         pv = self.pv
+        rate_redV = self.rate_redV
 
         smmV = scenario.smmV
         dqV = scenario.dqV
@@ -92,13 +94,16 @@ class Loan:
         dqMdrV = dqV + mdrV  # dqV is additional
 
         # Amortization
-        rate = wac / 12
-        X = -npf.pmt(rate, wam, pv) # Fixed monthly payment
+        wacV = wac - rate_redV
+        rateV = wacV / 12
+        X = -npf.pmt(rateV, wam, pv) # Fixed monthly payment
         
         # Most vectors are wam length. survivorship, balances, and specifically noted balance (len: wam + 1). relating to servicing fee (len: wam + lag)
         monthsV = np.arange(1, wam + 1 + recovery_lag) # len: wam+lag
-        balancesV = pv * (1 - (1 + rate) ** -(wam - np.arange(wam + 1))) / (1 - (1 + rate)**-wam) # len: wam+1
-        interestsV = balancesV[:-1] * rate
+        rateV = np.append(rateV, rateV[-1]) #len:wam+1 for balancesV calculation
+        balancesV = pv * (1 - (1 + rateV) ** -(wam - np.arange(wam + 1))) / (1 - (1 + rateV)**-wam) # len: wam+1
+        rateV = rateV[:-1]
+        interestsV = balancesV[:-1] * rateV
         principalsV = X - interestsV
         paydownV = principalsV / balancesV[:-1]
         
@@ -133,8 +138,8 @@ class Loan:
         
         refundPrinV = survivorshipV[:-1] * balancesV[1:] * refund_smm
         totalPrinV = pad_zeros(schedPrinV, period_with_lag) + pad_zeros(prepayPrinV, period_with_lag) + recoveryV # len: wam+lag, padded for recovery lag
-        compIntV = prepayPrinV * rate * scenario.compIntHC
-        refundIntV = refundPrinV * rate
+        compIntV = prepayPrinV * rateV * scenario.compIntHC
+        refundIntV = refundPrinV * rateV
         prepayPrinV = survivorshipV[:-1] * balancesV[1:] * smmV + refundPrinV # added refundPrin to prepay calculation
 
         # Servicing Fee
@@ -152,8 +157,8 @@ class Loan:
             servicingFeeV = servicingFee_begV
 
         # Interest and Cash Flow
-        actInterestV = rate*b_balanceV if scenario.is_advance else (
-            rate*(b_balanceV*(1-dqMdrV) - default_aggMDRV) - compIntV)
+        actInterestV = rateV*b_balanceV if scenario.is_advance else (
+            rateV*(b_balanceV*(1-dqMdrV) - default_aggMDRV) - compIntV)
         actInterestV -= refundIntV
         cfV = totalPrinV + pad_zeros(actInterestV, period_with_lag) # len: wam+lag, padded for recovery lag
 
