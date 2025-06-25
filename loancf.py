@@ -5,8 +5,8 @@ from dataclasses import dataclass, field
 import pandas as pd
 import numpy_financial as npf
 import numpy as np
-import torch
 from scipy.optimize import brentq
+from typing import Optional
 
 # --- Utility Functions ---
 
@@ -21,7 +21,7 @@ def safedivide(a, b):
 def calc(v): # for WAL calculations
     numerator = np.sum(np.maximum(0.0, v) * (np.arange(1, len(v) + 1) / 12.))
     denominator = np.sum(np.maximum(0.0, v))
-    return safedivide(numerator, denominator) 
+    return safedivide(numerator, denominator)
 
 def shift_elements(arr, num, fill_value):
     result = np.empty_like(arr)
@@ -53,8 +53,9 @@ class Scenario:
     dqV: np.ndarray # Delinquency rate
     mdrV: np.ndarray # Monthly Default Rate
     sevV: np.ndarray # Severity
-    refund_smm: np.ndarray # treat as prepay
-    aggMDR_timingV: np.ndarray # mdr percentage monthly vector
+    rate_redV: Optional[np.ndarray] = field(default=None) # reduces monthly rate
+    refund_smm: Optional[np.ndarray] = field(default=None) # treat as prepay
+    aggMDR_timingV: Optional[np.ndarray] = field(default=None) # mdr percentage monthly vector
     recovery_lag: int=0
     refund_premium: float=1.0 # premium of discount
     aggMDR: float=0.0 # mdr value of percentage of B0
@@ -63,6 +64,14 @@ class Scenario:
     is_advance: bool=False  #todo: adv | dq+default | dq=default at mon 1to4
     servicing_fee_method: str="avg"  # or "beg", toggle between avg and beginning bal servicing fee calculation
 
+    def __post_init__(self):
+        """Initialize optional arrays to zeros if not provided"""
+        if self.refund_smm is None:
+            self.refund_smm = np.zeros_like(self.smmV)  # Zero array matching smmV shape
+        if self.aggMDR_timingV is None:
+            self.aggMDR_timingV = np.zeros_like(self.smmV)  # Zero array matching smmV shape
+        if self.rate_redV is None:
+            self.rate_redV = np.zeros_like(self.smmV)  # Zero array matching smmV shape
 
 @dataclass
 class Input:
@@ -75,14 +84,13 @@ class Loan:
     wac: float  # Weighted Average Coupon (annual interest rate)
     wam: int    # Weighted Average Maturity (in months)
     pv: float   # Present Value (loan amount), pv is B0
-    rate_redV: np.ndarray
 
     def getCashflow(self, scenario):
         wac = self.wac
         wam = self.wam
         pv = self.pv
-        rate_redV = self.rate_redV
 
+        rate_redV = scenario.rate_redV
         smmV = scenario.smmV
         dqV = scenario.dqV
         mdrV = scenario.mdrV
@@ -93,15 +101,19 @@ class Loan:
         refund_premium = scenario.refund_premium
         dqMdrV = dqV + mdrV  # dqV is additional
 
-        # Amortization
+        '''
+        Most vectors are wam length.
+        survivorship, balances, and specifically noted balance (len: wam + 1)
+        relating to servicing fee (len: wam + lag)
+        '''
         wacV = wac - rate_redV
         rateV = wacV / 12
-        X = -npf.pmt(rateV, wam, pv) # Fixed monthly payment
-        
-        # Most vectors are wam length. survivorship, balances, and specifically noted balance (len: wam + 1). relating to servicing fee (len: wam + lag)
         monthsV = np.arange(1, wam + 1 + recovery_lag) # len: wam+lag
+
+        #Fixed calculation
+        X = -npf.pmt(rateV, wam, pv) # Fixed monthly payment
         rateV = np.append(rateV, rateV[-1]) #len:wam+1 for balancesV calculation
-        balancesV = pv * (1 - (1 + rateV) ** -(wam - np.arange(wam + 1))) / (1 - (1 + rateV)**-wam) # len: wam+1
+        balancesV = pv * (1 - (1 + rateV) ** -(wam - np.arange(wam + 1))) / (1 - (1 + rateV)**-wam) # len: wam+1, fixed rate
         rateV = rateV[:-1]
         interestsV = balancesV[:-1] * rateV
         principalsV = X - interestsV
@@ -113,6 +125,7 @@ class Loan:
         scaled_default_aggMDRV = default_aggMDRV / ( balancesV[:-1] * p_survV )
         cum_scaled_default_aggMDRV = np.cumsum(scaled_default_aggMDRV)
         survivorshipV=np.insert(p_survV*(1-cum_scaled_default_aggMDRV),0,1) # wam+1
+        survivorshipV = np.maximum(survivorshipV, 0)
 
         actualBalanceV = survivorshipV * balancesV # len: wam+1
         b_balanceV= actualBalanceV[:-1] # beginning int bearing bal
@@ -160,6 +173,7 @@ class Loan:
         actInterestV = rateV*b_balanceV if scenario.is_advance else (
             rateV*(b_balanceV*(1-dqMdrV) - default_aggMDRV) - compIntV)
         actInterestV -= refundIntV
+        actInterestV = np.maximum(actInterestV, 0)
         cfV = totalPrinV + pad_zeros(actInterestV, period_with_lag) # len: wam+lag, padded for recovery lag
 
         schedPrinV = pad_zeros(schedPrinV, period_with_lag)
@@ -211,20 +225,3 @@ class Loan:
 
         yield_solution = brentq(price_for_yield, 0.0001, 1.0)
         return yield_solution
-
-class LoanAmort(torch.nn.Module): # takes in 2d tensor of n_loan, goes down nx3 each row is a loan
-    def __init__(self, shape=(3, 3, 3)): 
-        super(LoanAmort, self).__init__()
-        self.tensor = torch.randn(shape)  # Initialize with random values
-        self.shape = shape
-    def forward(self): # takes in scenario tensor
-        result = self.tensor + 1
-        return result
-
-if __name__ == '__main__':
-
-    # Test 3D tensor
-    model = LoanAmort()
-    result = model()
-
-    print(result)
