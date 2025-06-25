@@ -48,6 +48,11 @@ def pad_zeros(vec, n, pad_value=0): # for lag
 # --- Data Classes ---
 
 @dataclass
+class Config:
+    servicing_fee_method: str="avg"  # or "beg", toggle between avg and beginning bal servicing fee calculation
+    rate_red_method: bool=False # default unfixed rate
+
+@dataclass
 class Scenario:
     smmV: np.ndarray # Single Monthly Mortality (prepayment vector)
     dqV: np.ndarray # Delinquency rate
@@ -62,7 +67,6 @@ class Scenario:
     compIntHC: float=0.0 # Haircut
     servicing_fee: float=0.0
     is_advance: bool=False  #todo: adv | dq+default | dq=default at mon 1to4
-    servicing_fee_method: str="avg"  # or "beg", toggle between avg and beginning bal servicing fee calculation
 
     def __post_init__(self):
         """Initialize optional arrays to zeros if not provided"""
@@ -72,6 +76,7 @@ class Scenario:
             self.aggMDR_timingV = np.zeros_like(self.smmV)  # Zero array matching smmV shape
         if self.rate_redV is None:
             self.rate_redV = np.zeros_like(self.smmV)  # Zero array matching smmV shape
+
 
 @dataclass
 class Input:
@@ -85,7 +90,7 @@ class Loan:
     wam: int    # Weighted Average Maturity (in months)
     pv: float   # Present Value (loan amount), pv is B0
 
-    def getCashflow(self, scenario):
+    def getCashflow(self, scenario, config):
         wac = self.wac
         wam = self.wam
         pv = self.pv
@@ -110,19 +115,44 @@ class Loan:
         rateV = wacV / 12
         monthsV = np.arange(1, wam + 1 + recovery_lag) # len: wam+lag
 
-        #Fixed calculation
-        X = -npf.pmt(rateV, wam, pv) # Fixed monthly payment
-        rateV = np.append(rateV, rateV[-1]) #len:wam+1 for balancesV calculation
-        balancesV = pv * (1 - (1 + rateV) ** -(wam - np.arange(wam + 1))) / (1 - (1 + rateV)**-wam) # len: wam+1, fixed rate
-        rateV = rateV[:-1]
-        interestsV = balancesV[:-1] * rateV
-        principalsV = X - interestsV
-        paydownV = principalsV / balancesV[:-1]
+        if config.rate_red_method == False:
+            # Fixed rate calculation
+            X = -npf.pmt(rateV, wam, pv) # Fixed monthly payment
+            rateV = np.append(rateV, rateV[-1]) #len:wam+1 for balancesV calculation
+            balancesV = pv * (1 - (1 + rateV) ** -(wam - np.arange(wam + 1))) / (1 - (1 + rateV)**-wam) # len: wam+1, fixed rate
+            rateV = rateV[:-1]
+            interestsV = balancesV[:-1] * rateV
+            principalsV = X - interestsV
+            paydownV = principalsV / balancesV[:-1]
+        else:
+            # Unfixed rate calculation
+            unfixed_balV = np.zeros(wam+1)
+            unfixed_balV[0] = pv
+            remaining_termV = wam - np.arange(wam + 1)
+
+            rateV = np.append(rateV, rateV[-1]) #len:wam+1 for balancesV calculation
+            denominator = 1 - (1 + rateV) ** (-remaining_termV)
+            payment_factorsV = np.where(denominator != 0, rateV / denominator, 0.0)
+            
+            paymentsV = np.zeros(wam) + 1
+            principalsV = np.zeros(wam) + 1
+
+            for t in range(wam):
+                paymentsV[t] = unfixed_balV[t] * payment_factorsV[t]
+                interest = unfixed_balV[t] * rateV[t]
+                principalsV[t] = paymentsV[t] - interest
+                unfixed_balV[t+1] = unfixed_balV[t] - principalsV[t]
+
+            unfixed_balV = np.maximum(unfixed_balV, 0)
+            balancesV = unfixed_balV
+            paydownV = np.where(balancesV[:-1] != 0, principalsV / balancesV[:-1], 0.0)
+            rateV = rateV[:-1]
+
         
         p_survV = np.cumprod(np.ones(wam) - smmV - refund_smm - mdrV)
         default_aggMDRV = pv*scenario.aggMDR * scenario.aggMDR_timingV
         dqPrin_aggMDRV = paydownV * default_aggMDRV
-        scaled_default_aggMDRV = default_aggMDRV / ( balancesV[:-1] * p_survV )
+        scaled_default_aggMDRV = np.where(( balancesV[:-1] * p_survV ) != 0, default_aggMDRV / ( balancesV[:-1] * p_survV ), 0.0)
         cum_scaled_default_aggMDRV = np.cumsum(scaled_default_aggMDRV)
         survivorshipV=np.insert(p_survV*(1-cum_scaled_default_aggMDRV),0,1) # wam+1
         survivorshipV = np.maximum(survivorshipV, 0)
@@ -130,7 +160,6 @@ class Loan:
         actualBalanceV = survivorshipV * balancesV # len: wam+1
         b_balanceV= actualBalanceV[:-1] # beginning int bearing bal
         actualBalanceV = actualBalanceV[1:] # ending interest bearing balance
-        balanceDiffV = b_balanceV - actualBalanceV       
 
         # Scheduled, prepayment, default, total principals, and deadbeat balance
         dqPrinV = np.zeros(wam) if scenario.is_advance else (
@@ -164,7 +193,7 @@ class Loan:
         servicingFee_begV = b_totalBalV * servicingFee_rate # len: wam+lag, uses beginning balance
         servicingFee_avgV = ((b_totalBalV + totalBalV) / 2) * servicingFee_rate # len: wam+lag
         
-        if scenario.servicing_fee_method == "avg":
+        if config.servicing_fee_method == "avg":
             servicingFeeV = servicingFee_avgV
         else:
             servicingFeeV = servicingFee_begV
@@ -203,17 +232,17 @@ class Loan:
         
         return df
         
-    def y2p(self, scenario, input): # yield to price
+    def y2p(self, scenario, input, config): # yield to price
         yV = (1 + input.yieldValue/12)**np.arange(1, self.wam + 1 + scenario.recovery_lag) # len of months + recovery_lag
 
-        cfV = self.getCashflow(scenario)["CFL"].values
-        servicingFeeV = self.getCashflow(scenario)["Servicing Fee"].values
-        refundPrinV = self.getCashflow(scenario).get("Refund Prin").values
+        cfV = self.getCashflow(scenario, config)["CFL"].values
+        servicingFeeV = self.getCashflow(scenario, config)["Servicing Fee"].values
+        refundPrinV = self.getCashflow(scenario, config).get("Refund Prin").values
 
         px = np.sum((cfV - servicingFeeV) / yV) / (self.pv - np.sum(refundPrinV / yV))
         return px
 
-    def p2y(self, scenario, input): # price to yield
+    def p2y(self, scenario, input, config): # price to yield
         price_target = input.fullpx
 
         def price_for_yield(y):
@@ -221,7 +250,7 @@ class Loan:
                 def __init__(self, yieldValue):
                     self.yieldValue = yieldValue
             input_obj = Helper(y)
-            return self.y2p(scenario, input_obj) - price_target
+            return self.y2p(scenario, input_obj, config) - price_target
 
         yield_solution = brentq(price_for_yield, 0.0001, 1.0)
         return yield_solution

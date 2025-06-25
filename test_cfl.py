@@ -3,7 +3,7 @@
 
 import pytest
 import numpy as np
-from loancf import Loan, Input, Scenario, cpr2smm, calc
+from loancf import Loan, Input, Scenario, Config, cpr2smm, calc
 
 def test_py1():
     '''
@@ -26,7 +26,8 @@ def test_py1():
 
     for smm, mdr, sev, yield_value, expected_px in test_cases:      
         loan = Loan(wac=0.0632, wam=wam, pv=100000000)
-        y = Input(yieldValue=yield_value)        
+        y = Input(yieldValue=yield_value)
+        config = Config() 
         scenario = Scenario(
             smmV=np.full(wam, smm), 
             dqV=np.full(wam, 0), 
@@ -34,8 +35,8 @@ def test_py1():
             sevV=np.full(wam, sev),
         )
 
-        df = loan.getCashflow(scenario)
-        px = loan.y2p(scenario, y)
+        df = loan.getCashflow(scenario, config)
+        px = loan.y2p(scenario, y, config)
         
         # Assert
         assert np.isclose(px, expected_px, rtol=0, atol=1e-7), \
@@ -58,6 +59,7 @@ def test_py2():
     for smm, mdr, sev, yield_value, expected_px, expected_wal_PrinV, expected_wal_BalanceDiffV, expected_wal_InterestV, expected_wal_cfl  in test_cases:
         loan = Loan(wac=0.0632, wam=wam, pv=100000000)
         y = Input(yieldValue=yield_value)
+        config = Config()
         scenario = Scenario(
             smmV=np.full(wam, smm), 
             dqV=np.full(wam, 0), 
@@ -65,8 +67,9 @@ def test_py2():
             sevV=np.full(wam, sev),
             )
         
-        df = loan.getCashflow(scenario)
-        px = loan.y2p(scenario, y)
+        df = loan.getCashflow(scenario, config)
+        px = loan.y2p(scenario, y, config)
+
 
         wal_PrinV = calc(df["Prin"])
         wal_BalanceDiffV = calc(df["Beginning Balance"] - df["Balance"])
@@ -101,6 +104,7 @@ def test_st():
         aggMDR=0, aggMDR_timingV=aggMDR_timingV,
         refund_smm=cpr2smm(np.array([.7, .2, .1, .05, .02, .01] + [0]*(wam-6))))
     y = Input(yieldValue=.1)
+    config = Config()
 
     for att, val, px_expe in [('aggMDR', 0, 1.0986671204321417),
                               ('compIntHC', .4, 1.0961567650292567),
@@ -108,8 +112,8 @@ def test_st():
                               ('recovery_lag', 4, 1.05022636607),
                          ]:
         setattr(scenario, att, val)
-        df = loan.getCashflow(scenario)
-        px = loan.y2p(scenario, y)
+        df = loan.getCashflow(scenario, config)
+        px = loan.y2p(scenario, y, config)
         print(df, px)
         assert np.isclose(px, px_expe, rtol=0, atol=1e-12), \
             f'Actual v expected: {px} v {px_expe} for {att}={val}'
@@ -136,27 +140,27 @@ def test_st2():
         refund_smm=cpr2smm(.01*np.array([74, 15, 5, 3, 2, 1] + [0]*(wam-6))), #refund cpr to smm   
         compIntHC= .2, # prepayment haircut,
         servicing_fee=0.02,
-        servicing_fee_method='avg'
     )
     y = Input(yieldValue=0.1)
+    config = Config()
 
     for att, val, px_expe in [('recovery_lag', 4, 1.05063070588810)]:
         setattr(scenario, att, val)
-        df = loan.getCashflow(scenario)
-        px = loan.y2p(scenario, y)
+        df = loan.getCashflow(scenario, config)
+        px = loan.y2p(scenario, y, config)
         print(df,px)
         assert np.isclose(px, px_expe, rtol=0, atol=1e-12), \
             f'Actual v expected: {px} v {px_expe} for {att}={val}'
         
     # testing p2y
     p = Input(fullpx=1.05063070588810)
-    y2 = loan.p2y(scenario, p)
+    y2 = loan.p2y(scenario, p, config)
     print("Yield:", y2)
     assert np.isclose(y2, 0.1, rtol=0, atol=1e-12)
 
 def test_st3():
     """
-    0 Scenario
+    0 Scenario, unfixed rate
     Short-dated loan
     """
     wam = 12
@@ -170,14 +174,15 @@ def test_st3():
         aggMDR=0, #aggMDR is CGL
         compIntHC= 0, # prepayment haircut,
         servicing_fee=0,
-        servicing_fee_method='avg'
+        rate_redV= np.array([0.0001] * wam)
     )
     y = Input(yieldValue=0.1)
+    config = Config(rate_red_method=True)
 
-    for att, val, px_expe in [('recovery_lag', 0, 1.10886814726999)]:
+    for att, val, px_expe in [('recovery_lag', 0, 1.10881219814726)]:
         setattr(scenario, att, val)
-        df = loan.getCashflow(scenario)
-        px = loan.y2p(scenario, y)
+        df = loan.getCashflow(scenario, config)
+        px = loan.y2p(scenario, y, config)
         print(df,px)
         assert np.isclose(px, px_expe, rtol=0, atol=1e-12), \
             f'Actual v expected: {px} v {px_expe} for {att}={val}'
@@ -186,6 +191,6 @@ def test_st3():
 
 if __name__ == '__main__':
     while(1):
-        test_py1()
+        test_st3()
         break
     
