@@ -126,28 +126,15 @@ class Loan:
             paydownV = principalsV / balancesV[:-1]
         else:
             # Unfixed rate calculation
-            unfixed_balV = np.zeros(wam+1)
-            unfixed_balV[0] = pv
-            remaining_termV = wam - np.arange(wam + 1)
-
             rateV = np.append(rateV, rateV[-1]) #len:wam+1 for balancesV calculation
-            denominator = 1 - (1 + rateV) ** (-remaining_termV)
-            payment_factorsV = np.where(denominator != 0, rateV / denominator, 0.0)
-            
-            paymentsV = np.zeros(wam) + 1
-            principalsV = np.zeros(wam) + 1
+            alphaV = rateV/(((1 + rateV) ** (wam - np.arange(wam + 1)) - 1))
+            balancesV = np.concatenate(([pv], pv * np.cumprod(1-alphaV)[:-1]))
+            balancesV = np.maximum(balancesV, 0)
+            principalsV = balancesV[:-1] - balancesV[1:]
+            interestsV = balancesV[:-1] * rateV[:-1]
 
-            for t in range(wam):
-                paymentsV[t] = unfixed_balV[t] * payment_factorsV[t]
-                interest = unfixed_balV[t] * rateV[t]
-                principalsV[t] = paymentsV[t] - interest
-                unfixed_balV[t+1] = unfixed_balV[t] - principalsV[t]
-
-            unfixed_balV = np.maximum(unfixed_balV, 0)
-            balancesV = unfixed_balV
             paydownV = np.where(balancesV[:-1] != 0, principalsV / balancesV[:-1], 0.0)
             rateV = rateV[:-1]
-
         
         p_survV = np.cumprod(np.ones(wam) - smmV - refund_smm - mdrV)
         default_aggMDRV = pv*scenario.aggMDR * scenario.aggMDR_timingV
