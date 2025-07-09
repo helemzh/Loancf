@@ -112,22 +112,22 @@ class Loan:
         relating to servicing fee (len: wam + lag)
         '''
         wacV = wac - rate_redV
+        rate = wac/12
         rateV = wacV / 12
         monthsV = np.arange(1, wam + 1 + recovery_lag) # len: wam+lag
 
         if config.rate_red_method == False:
             # Fixed rate calculation
-            X = -npf.pmt(rateV, wam, pv) # Fixed monthly payment
-            rateV = np.append(rateV, rateV[-1]) #len:wam+1 for balancesV calculation
-            balancesV = pv * (1 - (1 + rateV) ** -(wam - np.arange(wam + 1))) / (1 - (1 + rateV)**-wam) # len: wam+1, fixed rate
-            rateV = rateV[:-1]
-            interestsV = balancesV[:-1] * rateV
+            X = -npf.pmt(rate, wam, pv) # Fixed monthly payment
+            balancesV = pv * (1 - (1 + rate) ** -(wam - np.arange(wam + 1))) / (1 - (1 + rate)**-wam) # len: wam+1, fixed rate
+            interestsV = balancesV[:-1] * rate
             principalsV = X - interestsV
             paydownV = principalsV / balancesV[:-1]
         else:
             # Unfixed rate calculation
             rateV = np.append(rateV, rateV[-1]) #len:wam+1 for balancesV calculation
-            alphaV = rateV/(((1 + rateV) ** (wam - np.arange(wam + 1)) - 1))
+            denom = (1 + rateV) ** (wam - np.arange(wam + 1)) - 1
+            alphaV = np.where(np.abs(denom) < 1e-12, 0.0, rateV / denom)            
             balancesV = np.concatenate(([pv], pv * np.cumprod(1-alphaV)[:-1]))
             balancesV = np.maximum(balancesV, 0)
             principalsV = balancesV[:-1] - balancesV[1:]

@@ -6,6 +6,25 @@ import numpy as np
 import torch
 from scipy.optimize import newton
 
+# Loan tensor index constants
+L_WAC_I = 0
+L_WAM_I = 1
+L_PV_I = 2
+
+# Scenario tensor index constants
+SMM_I = 0
+DQ_I = 1
+MDR_I = 2
+SEV_I = 3
+REFUND_SMM_I = 4
+AGGMDR_I = 5
+AGGMDR_TIMING_I = 6
+COMPINTHC_I = 7
+SERVICING_FEE_I = 8
+RECOVERY_LAG_I = 9
+REFUND_PREMIUM_I = 10
+RATE_RED_I = 11
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def cpr2smm(cpr):
@@ -123,10 +142,11 @@ def getCashflow_tensor(
     N, periods = smmV.shape
 
     wamV = wam.squeeze() if wam.ndim > 1 else wam  # [N]
+    pv = pv.squeeze()
+    wac = wac.squeeze()
     max_wam = int(wamV.max().item())
-    device = wac.device
 
-    wacV = wac - rate_redV
+    wacV = wac.unsqueeze(1) - rate_redV
     rateV = wacV / 12
 
     # Create period indices for all loans: [N, max_wamV+1]
@@ -135,27 +155,27 @@ def getCashflow_tensor(
 
     # Broadcast pv, rate, wam to [N, max_wamV+1]
     pv_exp = pv.unsqueeze(-1).expand(-1, max_wam + 1)
-    rate_exp = rateV.unsqueeze(-1).expand(-1, max_wam + 1)
+    rate_exp = torch.cat((rateV, rateV[..., -1:].clone()), dim=-1)
     wam_exp = wamV.unsqueeze(-1).expand(-1, max_wam + 1)
 
     # Calculate balancesV for all loans and periods, then mask out padded positions
     if rate_red_method == False:
         # Fixed rate calculation
-        X = (pv * rateV) / (1 - (1 + rateV) ** -wamV)
+        X = (pv_exp * rate_exp) / (1 - (1 + rate_exp) ** -wam_exp)
         balancesV = pv_exp * (1 - (1 + rate_exp) ** -(wam_exp - period_idx)) / (1 - (1 + rate_exp) ** -wam_exp)
         balancesV = balancesV * mask  # Zero out padded positions
 
-        interestsV = balancesV[:, :-1] * rateV.unsqueeze(1)  # [N, periods-1]
-        principalsV = X.unsqueeze(1) - interestsV  # [N, periods]
+        interestsV = balancesV[:, :-1] * rateV  # [N, periods-1]
+        principalsV = X[:, :-1] - interestsV  # [N, periods]
         paydownV = principalsV / balancesV[:, :-1]  # [N, periods]
     else:
         remaining_terms = wam_exp - period_idx
         denominator = (1 + rate_exp) ** remaining_terms - 1
         alphaV = rate_exp / denominator
+        alphaV = torch.nan_to_num(alphaV, nan=0.0, posinf=0.0, neginf=0.0)
         cumprod = torch.cumprod(1 - alphaV, dim=1)
-
-        balancesV = torch.cat([pv.unsqueeze(1), pv.unsqueeze(1) * cumprod[:, :-1]], dim=1)
-        balancesV = torch.where(mask, balancesV, torch.zeros_like(balancesV))
+        balancesV = torch.cat([pv_exp[:, :1], pv_exp[:, :-1] * cumprod[:, :-1]], dim=1)
+        balancesV = torch.maximum(balancesV, torch.zeros_like(balancesV))  # Ensure non-negative balances
         principalsV = balancesV[:, :-1] - balancesV[:, 1:]
         interestsV = balancesV[:, :-1] * rate_exp[:, :-1]
         paydownV = principalsV / balancesV[:, :-1]
@@ -199,8 +219,8 @@ def getCashflow_tensor(
     schedPrinV_pad = pad_zeros(schedPrinV, periods + max_recovery_lag)
     prepayPrinV_pad = pad_zeros(prepayPrinV, periods + max_recovery_lag)
     totalPrinV = schedPrinV_pad + prepayPrinV_pad + recoveryV
-    compIntV = prepayPrinV * rateV.unsqueeze(1) * compIntHC.unsqueeze(-1)
-    refundIntV = refundPrinV * rateV.unsqueeze(1)
+    compIntV = prepayPrinV * rateV * compIntHC.unsqueeze(-1)
+    refundIntV = refundPrinV * rateV
     prepayPrinV = survivorshipV[:, :-1] * balancesV[:, 1:] * smmV + refundPrinV
 
     # Servicing Fee Calculation
@@ -216,9 +236,16 @@ def getCashflow_tensor(
 
     # Interest and Cash Flow
     actInterestV = rateV * b_balanceV if is_advance else (
-        rateV.unsqueeze(1) * (b_balanceV * (1 - (dqV + mdrV)) - default_aggMDRV) - compIntV)
+        rateV * (b_balanceV * (1 - (dqV + mdrV)) - default_aggMDRV) - compIntV)
     actInterestV -= refundIntV
-    actInterestV_pad = torch.cat([actInterestV, torch.zeros(N, max_recovery_lag, device=device)], dim=1)
+
+    if max_recovery_lag > 0:
+        actInterestV_pad = torch.cat(
+            [actInterestV, torch.zeros(actInterestV.shape[0], max_recovery_lag, device=device)], dim=1
+        )
+    else:
+        actInterestV_pad = actInterestV
+
     cfV = totalPrinV + actInterestV_pad
 
     # Pad all vectors to period_with_lag
@@ -257,38 +284,58 @@ class LoanAmort(torch.nn.Module):
         self.n_loans = loans_tensor.shape[0]
         self.max_wam = int(self.loans_tensor[:, 1].max().item())
 
-    def forward(self, scenarios_tensor):
+    def forward(self, scenarios_tensor, mode="exhaustive", servicing_fee_method="avg", rate_red_method=False, is_advance=False):
         """
-        scenarios_tensor: [n_scenarios, n_vectors, max_wam]
+        scenarios_tensor: [n_scenarios, n_attributes, max_wam]
+        mode: "exhaustive" or "matched"
+        servicing_fee_method: "avg" or "beg"
+        rate_red_method: True or False (unfixed or fixed rate)
+        is_advance: bool
         n_vectors: [smm, dq, mdr, sev, refund_smm, aggMDR, aggMDR_timingV, compIntHC, servicing_fee]
         Returns: [n_loans, n_scenarios, max_wam+lag, n_features]
         """
         n_scenarios, n_vectors, max_wam = scenarios_tensor.shape
         n_loans = self.n_loans
 
-        # Unpack loan attributes
-        wac = self.loans_tensor[:, 0].view(n_loans, 1).expand(n_loans, n_scenarios).flatten()
-        wam = self.loans_tensor[:, 1].long().view(n_loans, 1).expand(n_loans, n_scenarios).flatten()
-        pv = self.loans_tensor[:, 2].view(n_loans, 1).expand(n_loans, n_scenarios).flatten()
+        if mode == "matched":
+            assert n_loans == n_scenarios, "Matched mode requires n_loans == n_scenarios"
+            # Loan attributes
+            wac = self.loans_tensor[:, L_WAC_I]
+            wam = self.loans_tensor[:, L_WAM_I].long()
+            pv = self.loans_tensor[:, L_PV_I]
 
-        # Unpack scenario attributes
-        smmV = scenarios_tensor[:, 0, :].unsqueeze(0).expand(n_loans, n_scenarios, max_wam).reshape(-1, max_wam)
-        dqV = scenarios_tensor[:, 1, :].unsqueeze(0).expand(n_loans, n_scenarios, max_wam).reshape(-1, max_wam)
-        mdrV = scenarios_tensor[:, 2, :].unsqueeze(0).expand(n_loans, n_scenarios, max_wam).reshape(-1, max_wam)
-        sevV = scenarios_tensor[:, 3, :].unsqueeze(0).expand(n_loans, n_scenarios, max_wam).reshape(-1, max_wam)
-        refund_smm = scenarios_tensor[:, 4, :].unsqueeze(0).expand(n_loans, n_scenarios, max_wam).reshape(-1, max_wam)
-        aggMDR = scenarios_tensor[:, 5, 0].unsqueeze(0).expand(n_loans, n_scenarios).flatten()
-        aggMDR_timingV = scenarios_tensor[:, 6, :].unsqueeze(0).expand(n_loans, n_scenarios, max_wam).reshape(-1, max_wam)
-        compIntHC = scenarios_tensor[:, 7, 0].unsqueeze(0).expand(n_loans, n_scenarios).flatten()
-        servicing_fee = scenarios_tensor[:, 8, 0].unsqueeze(0).expand(n_loans, n_scenarios).flatten()
-        recovery_lag = scenarios_tensor[:, 9, 0].unsqueeze(0).expand(n_loans, n_scenarios).flatten().int()
-        refund_premium = scenarios_tensor[:, 10, 0].unsqueeze(0).expand(n_loans, n_scenarios).flatten()
-        rate_redV = scenarios_tensor[:, 11, 0].unsqueeze(0).expand(n_loans, n_scenarios).flatten()
+            # Scenario attributes
+            smmV = scenarios_tensor[:, SMM_I, :]
+            dqV = scenarios_tensor[:, DQ_I, :]
+            mdrV = scenarios_tensor[:, MDR_I, :]
+            sevV = scenarios_tensor[:, SEV_I, :]
+            refund_smm = scenarios_tensor[:, REFUND_SMM_I, :]
+            aggMDR = scenarios_tensor[:, AGGMDR_I, 0]
+            aggMDR_timingV = scenarios_tensor[:, AGGMDR_TIMING_I, :]
+            compIntHC = scenarios_tensor[:, COMPINTHC_I, 0]
+            servicing_fee = scenarios_tensor[:, SERVICING_FEE_I, 0]
+            recovery_lag = scenarios_tensor[:, RECOVERY_LAG_I, 0].int()
+            refund_premium = scenarios_tensor[:, REFUND_PREMIUM_I, 0]
+            rate_redV = scenarios_tensor[:, RATE_RED_I, :]
+        else:
+            # Unpack loan attributes
+            wac = self.loans_tensor[:, L_WAC_I].view(n_loans, 1).expand(n_loans, n_scenarios).flatten()
+            wam = self.loans_tensor[:, L_WAM_I].long().view(n_loans, 1).expand(n_loans, n_scenarios).flatten()
+            pv = self.loans_tensor[:, L_PV_I].view(n_loans, 1).expand(n_loans, n_scenarios).flatten()
 
-        # Set these as constants for all scenarios/loans for simplicity
-        is_advance = False
-        servicing_fee_method = "avg"
-        rate_red_method = False
+            # Unpack scenario attributes
+            smmV = scenarios_tensor[:, SMM_I, :].unsqueeze(0).expand(n_loans, n_scenarios, max_wam).reshape(-1, max_wam)
+            dqV = scenarios_tensor[:, DQ_I, :].unsqueeze(0).expand(n_loans, n_scenarios, max_wam).reshape(-1, max_wam)
+            mdrV = scenarios_tensor[:, MDR_I, :].unsqueeze(0).expand(n_loans, n_scenarios, max_wam).reshape(-1, max_wam)
+            sevV = scenarios_tensor[:, SEV_I, :].unsqueeze(0).expand(n_loans, n_scenarios, max_wam).reshape(-1, max_wam)
+            refund_smm = scenarios_tensor[:, REFUND_SMM_I, :].unsqueeze(0).expand(n_loans, n_scenarios, max_wam).reshape(-1, max_wam)
+            aggMDR = scenarios_tensor[:, AGGMDR_I, 0].unsqueeze(0).expand(n_loans, n_scenarios).flatten()
+            aggMDR_timingV = scenarios_tensor[:, AGGMDR_TIMING_I, :].unsqueeze(0).expand(n_loans, n_scenarios, max_wam).reshape(-1, max_wam)
+            compIntHC = scenarios_tensor[:, COMPINTHC_I, 0].unsqueeze(0).expand(n_loans, n_scenarios).flatten()
+            servicing_fee = scenarios_tensor[:, SERVICING_FEE_I, 0].unsqueeze(0).expand(n_loans, n_scenarios).flatten()
+            recovery_lag = scenarios_tensor[:, RECOVERY_LAG_I, 0].unsqueeze(0).expand(n_loans, n_scenarios).flatten().int()
+            refund_premium = scenarios_tensor[:, REFUND_PREMIUM_I, 0].unsqueeze(0).expand(n_loans, n_scenarios).flatten()
+            rate_redV = scenarios_tensor[:, RATE_RED_I, :].unsqueeze(0).expand(n_loans, n_scenarios, max_wam).reshape(-1, max_wam)
 
         # Call vectorized cashflow for all pairs
         cf_dict = getCashflow_tensor(
@@ -300,10 +347,14 @@ class LoanAmort(torch.nn.Module):
         feature_names = list(cf_dict.keys())
         n_features = len(feature_names)
         period_with_lag = cf_dict["CFL"].shape[1]
-        n_pairs = n_loans * n_scenarios
-        result_tensor = torch.stack([cf_dict[k] for k in feature_names], dim=-1)  # [n_pairs, period_with_lag, n_features]
-        result_tensor = result_tensor.view(n_loans, n_scenarios, period_with_lag, n_features)
-        return result_tensor, feature_names
+        if mode == "matched":
+            result_tensor = torch.stack([cf_dict[k] for k in feature_names], dim=-1)  # [n_scenarios, period_with_lag, n_features]
+            return result_tensor, feature_names
+        else:
+            n_pairs = n_loans * n_scenarios
+            result_tensor = torch.stack([cf_dict[k] for k in feature_names], dim=-1)  # [n_pairs, period_with_lag, n_features]
+            result_tensor = result_tensor.view(n_loans, n_scenarios, period_with_lag, n_features)
+            return result_tensor, feature_names
 
 def y2p_tensor(loans_tensor, scenarios_tensor, yield_tensor):
     """
@@ -386,6 +437,8 @@ def p2y_tensor(loans_tensor, scenarios_tensor, price_tensor, y_init=.08):
 
     return torch.tensor(yield_tensor, dtype=loans_tensor.dtype, device=loans_tensor.device)
 
+
+# Outdated, will be adjusted for the new matched/exhaustive mode
 def yield_price_aggregation(
     loans_tensor,
     scenarios_tensor,
@@ -517,97 +570,3 @@ def yield_price_aggregation(
     else:
         raise ValueError("method must be 'pool' or 'loan'")
         
-
-# Scenario tensor index constants
-SMM_I = 0
-DQ_I = 1
-MDR_I = 2
-SEV_I = 3
-REFUND_SMM_I = 4
-AGGMDR_I = 5
-AGGMDR_TIMING_I = 6
-COMPINTHC_I = 7
-SERVICING_FEE_I = 8
-RECOVERY_LAG_I = 9
-REFUND_PREMIUM_I = 10
-RATE_RED_I = 11
-
-if __name__ == '__main__':
-    torch.set_printoptions(linewidth=200)
-
-    # Example: 3 loans, 2 scenario
-    # loans_tensor: [n_loans, 3] (columns: wac, wam, pv)
-    loans_tensor = torch.tensor([
-        [0.3, 12, 100],
-        [0.3, 12, 100],
-        [0.3, 12, 100],
-    ], dtype=torch.float32)
-
-    max_wam = int(loans_tensor[:, 1].max().item())
-    n_loans = loans_tensor.shape[0]
-    n_scenarios = 2
-    scenarios_tensor = torch.zeros(n_scenarios, 12, max_wam)
-
-    ### Scenario 0 ###
-    # Set up refund_smm and aggMDR_timingV
-    refund_smm = cpr2smm(.01 * torch.tensor([74, 15, 5, 3, 2, 1])) # input refund_smm values
-    scenarios_tensor[0, REFUND_SMM_I, :] = 0 # first fill 0
-    scenarios_tensor[0, REFUND_SMM_I, :len(refund_smm)] = refund_smm
-    aggMDR_timing = .01 * torch.tensor([23,10,10,10,10,10,8,7,5,4,2,1]) # input aggMDR_timing values
-    scenarios_tensor[0, AGGMDR_TIMING_I, :] = 0
-    scenarios_tensor[0, AGGMDR_TIMING_I, :len(aggMDR_timing)] = aggMDR_timing
-    scenarios_tensor[0, SMM_I, :] = cpr2smm(0.35)
-    scenarios_tensor[0, DQ_I, :] = 0
-    scenarios_tensor[0, MDR_I, :] = 0
-    scenarios_tensor[0, SEV_I, :] = 0.94
-    scenarios_tensor[0, AGGMDR_I, 0] = 0.03
-    scenarios_tensor[0, COMPINTHC_I, 0] = 0.2
-    scenarios_tensor[0, SERVICING_FEE_I, 0] = 0.02
-    scenarios_tensor[0, RECOVERY_LAG_I, 0] = 4
-    scenarios_tensor[0, REFUND_PREMIUM_I, 0] = 1.0
-    scenarios_tensor[0, RATE_RED_I, 0] = .0001
-
-    ### Scenario 1 ###
-    scenarios_tensor[1, REFUND_SMM_I, :] = 0
-    scenarios_tensor[1, AGGMDR_TIMING_I, :] = 0
-    scenarios_tensor[1, SMM_I, :] = cpr2smm(0.15)
-    scenarios_tensor[1, DQ_I, :] = 0
-    scenarios_tensor[1, MDR_I, :] = 0
-    scenarios_tensor[1, SEV_I, :] = 0
-    scenarios_tensor[1, AGGMDR_I, 0] = 0
-    scenarios_tensor[1, COMPINTHC_I, 0] = 0
-    scenarios_tensor[1, SERVICING_FEE_I, 0] = 0
-    scenarios_tensor[1, RECOVERY_LAG_I, 0] = 0
-    scenarios_tensor[1, REFUND_PREMIUM_I, 0] = 1.0
-    scenarios_tensor[1, RATE_RED_I, 0] = .0001
-
-    model = LoanAmort(loans_tensor)
-    result_tensor, feature_names = model(scenarios_tensor)
-
-    print("Result shape:", result_tensor.shape)  # [n_loans, n_scenarios, max_wam+lag, n_features]
-    # print(f"Result for loan 0, scenario 0:\n\t{feature_names}\n{result_tensor[0, 0]}")
-    # print(f"Result for loan 2, scenario 0:\n\t{feature_names}\n{result_tensor[2, 1]}")
-
-    ''' Price and Yield for each loan/scenario
-    yield_tensor = torch.full((n_loans, n_scenarios), 0.0667, device=loans_tensor.device)
-    price_tensor = y2p_tensor(loans_tensor, scenarios_tensor, yield_tensor)
-
-    target_price = torch.full((n_loans, n_scenarios), 1.061202911, device=loans_tensor.device) #1.0506307058881
-    yield_tensor = p2y_tensor(loans_tensor, scenarios_tensor, target_price)
-
-    print(f"price{price_tensor}, \nyield{yield_tensor}")
-    '''
-
-    # Example yield-price aggregation, when loan method: set tensor size as (n_loans,) pool method: (n_scenarios,)
-    yield_tensor = torch.full((n_scenarios,), 0.10, device=loans_tensor.device)
-    price_tensor = yield_price_aggregation(
-        loans_tensor, scenarios_tensor, yield_tensor, function='y2p', method='pool'
-    )
-    print(f"Aggregated price: {price_tensor}")
-
-
-    target_price = torch.full((n_scenarios,), 1.0506307058881, device=loans_tensor.device)
-    yield_tensor = yield_price_aggregation(
-        loans_tensor, scenarios_tensor, target_price, function='p2y', method='pool'
-    )   
-    print(f"Aggregated yield: {yield_tensor}")
