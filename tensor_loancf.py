@@ -25,7 +25,8 @@ RECOVERY_LAG_I = 9
 REFUND_PREMIUM_I = 10
 RATE_RED_I = 11
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = "cpu"
 
 def cpr2smm(cpr):
     return 1 - (1 - cpr) ** (1 / 12)
