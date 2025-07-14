@@ -116,25 +116,31 @@ class Loan:
         rateV = wacV / 12
         monthsV = np.arange(1, wam + 1 + recovery_lag) # len: wam+lag
 
-        if config.rate_red_method == False:
-            # Fixed rate calculation
-            X = -npf.pmt(rate, wam, pv) # Fixed monthly payment
-            balancesV = pv * (1 - (1 + rate) ** -(wam - np.arange(wam + 1))) / (1 - (1 + rate)**-wam) # len: wam+1, fixed rate
-            interestsV = balancesV[:-1] * rate
-            principalsV = X - interestsV
+        if np.isclose(rate, 0, rtol=0, atol=1e-8):
+            balancesV = np.linspace(pv, 0, wam+1) # len: wam+1
+            principalsV = np.full(wam, pv / wam)
+            interestsV = np.zeros(wam)
             paydownV = principalsV / balancesV[:-1]
         else:
-            # Unfixed rate calculation
-            rateV = np.append(rateV, rateV[-1]) #len:wam+1 for balancesV calculation
-            denom = (1 + rateV) ** (wam - np.arange(wam + 1)) - 1
-            alphaV = np.where(np.abs(denom) < 1e-12, 0.0, rateV / denom)            
-            balancesV = np.concatenate(([pv], pv * np.cumprod(1-alphaV)[:-1]))
-            balancesV = np.maximum(balancesV, 0)
-            principalsV = balancesV[:-1] - balancesV[1:]
-            interestsV = balancesV[:-1] * rateV[:-1]
+            if config.rate_red_method == False:
+                # Fixed rate calculation
+                X = -npf.pmt(rate, wam, pv) # Fixed monthly payment
+                balancesV = pv * (1 - (1 + rate) ** -(wam - np.arange(wam + 1))) / (1 - (1 + rate)**-wam) # len: wam+1, fixed rate
+                interestsV = balancesV[:-1] * rate
+                principalsV = X - interestsV
+                paydownV = principalsV / balancesV[:-1]
+            else:
+                # Unfixed rate calculation
+                rateV = np.append(rateV, rateV[-1]) #len:wam+1 for balancesV calculation
+                denom = (1 + rateV) ** (wam - np.arange(wam + 1)) - 1
+                alphaV = np.where(np.abs(denom) < 1e-12, 0.0, rateV / denom)            
+                balancesV = np.concatenate(([pv], pv * np.cumprod(1-alphaV)[:-1]))
+                balancesV = np.maximum(balancesV, 0)
+                principalsV = balancesV[:-1] - balancesV[1:]
+                interestsV = balancesV[:-1] * rateV[:-1]
 
-            paydownV = np.where(balancesV[:-1] != 0, principalsV / balancesV[:-1], 0.0)
-            rateV = rateV[:-1]
+                paydownV = np.where(balancesV[:-1] != 0, principalsV / balancesV[:-1], 0.0)
+                rateV = rateV[:-1]
         
         p_survV = np.cumprod(np.ones(wam) - smmV - refund_smm - mdrV)
         default_aggMDRV = pv*scenario.aggMDR * scenario.aggMDR_timingV
