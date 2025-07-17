@@ -12,6 +12,9 @@ from typing import Optional
 
 cpr2smm = lambda cpr: 1-(1-cpr)**(1/12)
 
+bey2y = lambda y: 12 * ((1 + y / 2) ** (1 / 6) - 1)
+y2bey = lambda y: 2 *((1 + y/12) ** 6 - 1)
+
 def safedivide(a, b):
     if np.isclose(b, 0, rtol=0, atol=3e-11):
         return 0
@@ -58,6 +61,8 @@ class Scenario:
     dqV: np.ndarray # Delinquency rate
     mdrV: np.ndarray # Monthly Default Rate
     sevV: np.ndarray # Severity
+    dq_adv_prin: Optional[np.ndarray] = field(default=None) # Fraction of dq principal recovered immediately
+    dq_adv_int: Optional[np.ndarray] = field(default=None) # Fraction of dq interest recovered immediately
     rate_redV: Optional[np.ndarray] = field(default=None) # reduces monthly rate
     refund_smm: Optional[np.ndarray] = field(default=None) # treat as prepay
     aggMDR_timingV: Optional[np.ndarray] = field(default=None) # mdr percentage monthly vector
@@ -73,10 +78,14 @@ class Scenario:
         if self.refund_smm is None:
             self.refund_smm = np.zeros_like(self.smmV)  # Zero array matching smmV shape
         if self.aggMDR_timingV is None:
-            self.aggMDR_timingV = np.zeros_like(self.smmV)  # Zero array matching smmV shape
+            self.aggMDR_timingV = np.zeros_like(self.smmV)
         if self.rate_redV is None:
-            self.rate_redV = np.zeros_like(self.smmV)  # Zero array matching smmV shape
-
+            self.rate_redV = np.zeros_like(self.smmV)
+        if self.dq_adv_prin is None:
+            self.dq_adv_prin = np.zeros_like(self.smmV)
+        if self.dq_adv_int is None:
+            self.dq_adv_int = np.zeros_like(self.smmV)
+        
 
 @dataclass
 class Input:
@@ -100,11 +109,13 @@ class Loan:
         dqV = scenario.dqV
         mdrV = scenario.mdrV
         sevV = scenario.sevV
+        dq_adv_prin = scenario.dq_adv_prin
+        dq_adv_int = scenario.dq_adv_int
         recovery_lag = scenario.recovery_lag
         period_with_lag = wam + recovery_lag # adjust number of rows to add lag
         refund_smm = scenario.refund_smm
         refund_premium = scenario.refund_premium
-        dqMdrV = dqV + mdrV  # dqV is additional
+        #dqMdrV = dqV + mdrV  # dqV is additional, separating the use of dq and mdr
 
         '''
         Most vectors are wam length.
@@ -117,6 +128,7 @@ class Loan:
         monthsV = np.arange(1, wam + 1 + recovery_lag) # len: wam+lag
 
         if np.isclose(rate, 0, rtol=0, atol=1e-8):
+            # Zero rate case
             balancesV = np.linspace(pv, 0, wam+1) # len: wam+1
             principalsV = np.full(wam, pv / wam)
             interestsV = np.zeros(wam)
@@ -155,9 +167,9 @@ class Loan:
         actualBalanceV = actualBalanceV[1:] # ending interest bearing balance
 
         # Scheduled, prepayment, default, total principals, and deadbeat balance
-        dqPrinV = np.zeros(wam) if scenario.is_advance else (
-            survivorshipV[:-1] * principalsV * dqMdrV + dqPrin_aggMDRV )
-        schedPrinV = survivorshipV[:-1] * principalsV - dqPrinV
+        schedDQPrinV = survivorshipV[:-1] * principalsV * (1-mdrV) * dqV * (1-dq_adv_prin)
+        schedDefaultPrinV = survivorshipV[:-1] * principalsV * mdrV + dqPrin_aggMDRV
+        schedPrinV = survivorshipV[:-1] * principalsV - schedDQPrinV - schedDefaultPrinV
         prepayPrinV = survivorshipV[:-1] * balancesV[1:] * smmV
         defaultV = b_balanceV * mdrV + default_aggMDRV
         # totalEndingBalV = actualBalanceV + dqPrinV 
@@ -193,11 +205,14 @@ class Loan:
 
         # Interest and Cash Flow
         actInterestV = rateV*b_balanceV if scenario.is_advance else (
-            rateV*(b_balanceV*(1-dqMdrV) - default_aggMDRV) - compIntV)
+            rateV*(b_balanceV * (1-(1-mdrV) *dqV*(1-dq_adv_int) - mdrV) - default_aggMDRV) - compIntV)
+        
         actInterestV -= refundIntV
         actInterestV = np.maximum(actInterestV, 0)
-        cfV = totalPrinV + pad_zeros(actInterestV, period_with_lag) # len: wam+lag, padded for recovery lag
 
+        # Padding vectors for result df, len: wam+lag, padded for recovery lag
+        cfV = totalPrinV + pad_zeros(actInterestV, period_with_lag)
+        totalDefaultV = pad_zeros(schedDQPrinV + defaultV, period_with_lag)
         schedPrinV = pad_zeros(schedPrinV, period_with_lag)
         prepayPrinV = pad_zeros(prepayPrinV, period_with_lag)
         refundPrinV = pad_zeros(refundPrinV, period_with_lag)
@@ -234,6 +249,7 @@ class Loan:
 
         px = np.sum((cfV - servicingFeeV) / yV) / (self.pv - np.sum(refundPrinV / yV))
         return px
+    
 
     def p2y(self, scenario, input, config): # price to yield
         price_target = input.fullpx

@@ -3,7 +3,7 @@
 
 import pytest
 import numpy as np
-from loancf import Loan, Input, Scenario, Config, cpr2smm, calc
+from loancf import Loan, Input, Scenario, Config, cpr2smm, calc, y2bey, bey2y
 
 def test_py1():
     '''
@@ -187,10 +187,63 @@ def test_st3():
         assert np.isclose(px, px_expe, rtol=0, atol=1e-12), \
             f'Actual v expected: {px} v {px_expe} for {att}={val}'
         
+def test_dqadvance():
+    """
+    Intex test case for dq_adv_int and dq_adv_prin 
+    """
+    wam = 72
+    wac = 0.1585
+    pv = 9_498_315.68
+    loan = Loan(wac=wac, wam=wam, pv=pv) # WAC is APR
+    
+    scenario = Scenario(
+        smmV = cpr2smm(np.full(wam, .12)),
+        dqV= np.full(wam, 0),
+        mdrV= cpr2smm(np.array([0, 0, 0, .1] + [0.1] * (wam-4))),
+        sevV= np.full(wam, 1),
+        aggMDR= 0,
+        compIntHC= 0,
+        servicing_fee=0,
+        #rate_redV= np.array([0.0001] * wam),
+        dq_adv_prin=0,
+        dq_adv_int=0,
+        is_advance=True
+    )
+    input = Input(yieldValue=bey2y(0.1))
+    config = Config(rate_red_method=False)
+
+    df = loan.getCashflow(scenario, config)
+    px = loan.y2p(scenario, input, config)
+    assert np.isclose(px, .9381589717, rtol=0, atol=1e-8)
+
+    # with is_advance = False
+    scenario.is_advance = False
+    df = loan.getCashflow(scenario, config)
+    px = loan.y2p(scenario, input, config)
+    assert np.isclose(px, .93577210138, rtol=0, atol=1e-8)
+
+    # with dqV
+    scenario.dqV = .01 * np.array([1, 2, 3, 10] + [10] * (wam-4))
+    scenario.is_advance = False
+    df = loan.getCashflow(scenario, config)
+    px = loan.y2p(scenario, input, config)
+    assert np.isclose(px, .87181853008, rtol=0, atol=1e-10)
+
+    # with dq_adv_prin & int
+    scenario.dq_adv_prin = 0.7
+    scenario.dq_adv_int = 0.3
+    df = loan.getCashflow(scenario, config)
+    px = loan.y2p(scenario, input, config)
+    assert np.isclose(px, .90545638658, rtol=0, atol=1e-10)
+
+    settle_day = 14
+    accrued_interest = wac * (settle_day - 1) / 360
+
+    print(df,px)      
 
 
 if __name__ == '__main__':
     while(1):
-        test_st3()
+        test_dqadvance()
         break
     
