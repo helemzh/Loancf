@@ -145,7 +145,8 @@ class Loan:
                 # Unfixed rate calculation
                 rateV = np.append(rateV, rateV[-1]) #len:wam+1 for balancesV calculation
                 denom = (1 + rateV) ** (wam - np.arange(wam + 1)) - 1
-                alphaV = np.where(np.abs(denom) < 1e-12, 0.0, rateV / denom)            
+                # alphaV = np.where(np.abs(denom) < 1e-12, 0.0, rateV / denom)      
+                alphaV = np.divide(rateV, denom, out=np.zeros_like(rateV), where=np.abs(denom) >= 1e-12)
                 balancesV = np.concatenate(([pv], pv * np.cumprod(1-alphaV)[:-1]))
                 balancesV = np.maximum(balancesV, 0)
                 principalsV = balancesV[:-1] - balancesV[1:]
