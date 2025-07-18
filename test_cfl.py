@@ -207,29 +207,30 @@ def test_dqadvance():
         #rate_redV= np.array([0.0001] * wam),
         dq_adv_prin=0,
         dq_adv_int=0,
-        is_advance=True
     )
     input = Input(yieldValue=bey2y(0.1))
-    config = Config(rate_red_method=False)
-
+    
+    config = Config(rate_red_method=False, is_advance=True)
+    
     df = loan.getCashflow(scenario, config)
     px = loan.y2p(scenario, input, config)
     assert np.isclose(px, .9381589717, rtol=0, atol=1e-8)
-
+    
     # with is_advance = False
-    scenario.is_advance = False
+    config.is_advance = False
     df = loan.getCashflow(scenario, config)
     px = loan.y2p(scenario, input, config)
     assert np.isclose(px, .93577210138, rtol=0, atol=1e-8)
 
     # with dqV
     scenario.dqV = .01 * np.array([1, 2, 3, 10] + [10] * (wam-4))
-    scenario.is_advance = False
+    config.is_advance = False
     df = loan.getCashflow(scenario, config)
     px = loan.y2p(scenario, input, config)
     assert np.isclose(px, .87181853008, rtol=0, atol=1e-10)
-
+    
     # with dq_adv_prin & int
+    config.is_advance = False
     scenario.dq_adv_prin = 0.7
     scenario.dq_adv_int = 0.3
     df = loan.getCashflow(scenario, config)

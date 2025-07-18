@@ -54,6 +54,7 @@ def pad_zeros(vec, n, pad_value=0): # for lag
 class Config:
     servicing_fee_method: str="avg"  # or "beg", toggle between avg and beginning bal servicing fee calculation
     rate_red_method: bool=False # default unfixed rate
+    is_advance: bool=False  #todo: adv | dq+default | dq=default at mon 1to4
 
 @dataclass
 class Scenario:
@@ -71,7 +72,6 @@ class Scenario:
     aggMDR: float=0.0 # mdr value of percentage of B0
     compIntHC: float=0.0 # Haircut
     servicing_fee: float=0.0
-    is_advance: bool=False  #todo: adv | dq+default | dq=default at mon 1to4
 
     def __post_init__(self):
         """Initialize optional arrays to zeros if not provided"""
@@ -205,7 +205,7 @@ class Loan:
             servicingFeeV = servicingFee_begV
 
         # Interest and Cash Flow
-        actInterestV = rateV*b_balanceV if scenario.is_advance else (
+        actInterestV = rateV*b_balanceV if config.is_advance else (
             rateV*(b_balanceV * (1-(1-mdrV) *dqV*(1-dq_adv_int) - mdrV) - default_aggMDRV) - compIntV)
         
         actInterestV -= refundIntV
@@ -213,7 +213,7 @@ class Loan:
 
         # Padding vectors for result df, len: wam+lag, padded for recovery lag
         cfV = totalPrinV + pad_zeros(actInterestV, period_with_lag)
-        totalDefaultV = pad_zeros(schedDQPrinV + defaultV, period_with_lag)
+        totalDefaultV = pad_zeros(schedDQPrinV + schedDefaultPrinV + defaultV, period_with_lag)
         schedPrinV = pad_zeros(schedPrinV, period_with_lag)
         prepayPrinV = pad_zeros(prepayPrinV, period_with_lag)
         refundPrinV = pad_zeros(refundPrinV, period_with_lag)
@@ -237,6 +237,7 @@ class Loan:
             "Beginning Balance": b_balanceV,
             "Balance": actualBalanceV,
             "CFL": cfV,
+            "Total Default": totalDefaultV,
         })
         
         return df

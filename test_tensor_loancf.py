@@ -4,6 +4,7 @@ import torch
 from scipy.optimize import newton
 import tensor_loancf as tlcf
 import loancf as lcf
+import new_tensor_loancf as ntlcf
 
 
 def test_compare2d_3d():
@@ -19,7 +20,7 @@ def test_compare2d_3d():
     max_wam = int(loans_tensor[:, 1].max().item())
     n_loans = loans_tensor.shape[0]
     n_scenarios = 2
-    scenarios_tensor = torch.zeros(n_scenarios, 12, max_wam)
+    scenarios_tensor = torch.zeros(n_scenarios, 14, max_wam)
 
     ### Scenario 0 ###
     scenarios_tensor[0, tlcf.REFUND_SMM_I, :] = 0
@@ -33,7 +34,9 @@ def test_compare2d_3d():
     scenarios_tensor[0, tlcf.SERVICING_FEE_I, 0] = 0
     scenarios_tensor[0, tlcf.RECOVERY_LAG_I, 0] = 0
     scenarios_tensor[0, tlcf.REFUND_PREMIUM_I, 0] = 1.0
-    scenarios_tensor[0, tlcf.RATE_RED_I, 0] = 0.00015
+    scenarios_tensor[0, tlcf.RATE_RED_I, :] = 0.00015
+    scenarios_tensor[0, tlcf.DQ_ADV_PRIN_I, :] = 0
+    scenarios_tensor[0, tlcf.DQ_ADV_INT_I, :] = 0
     ### Scenario 1 ###
     scenarios_tensor[1, tlcf.REFUND_SMM_I, :] = 0
     scenarios_tensor[1, tlcf.AGGMDR_TIMING_I, :] = 0
@@ -46,8 +49,9 @@ def test_compare2d_3d():
     scenarios_tensor[1, tlcf.SERVICING_FEE_I, 0] = 0
     scenarios_tensor[1, tlcf.RECOVERY_LAG_I, 0] = 0
     scenarios_tensor[1, tlcf.REFUND_PREMIUM_I, 0] = 1.0
-    scenarios_tensor[1, tlcf.RATE_RED_I, 0] = .0001
-
+    scenarios_tensor[1, tlcf.RATE_RED_I, :] = .0001
+    scenarios_tensor[1, tlcf.DQ_ADV_PRIN_I, :] = 0
+    scenarios_tensor[1, tlcf.DQ_ADV_INT_I, :] = 0
 
     # list of result dataframes from loancf
     dfs = []
@@ -55,7 +59,6 @@ def test_compare2d_3d():
     
     # loop call loancf for each loan call each scenario
     for li in range(n_loans): #scenario index
-        #TODO: normalize wam before calculations, maybe switch loans and scenarios loops
         wam = int(loans_tensor[li, tlcf.L_WAM_I].item())
         loan = lcf.Loan(
             wac=loans_tensor[li, tlcf.L_WAC_I].cpu().numpy(), 
@@ -94,23 +97,22 @@ def test_compare2d_3d():
 
     # retrieve tensor results
     model = tlcf.LoanAmort(loans_tensor)
-    result_tensor, feature_names = model(scenarios_tensor, rate_red_method=True)
-    tensor_aggbalances = result_tensor[:,:,:, 10].sum(dim=(0,1)) #aggregate tensor results
-    print(np.allclose(numpy_balances_total, tensor_aggbalances.cpu().numpy())) # check 2 scenario vector balances
+    config = tlcf.Config(rate_red_method=True)
+    result_tensor, feature_names = model(scenarios_tensor, config)
+    tensor_aggbalances = result_tensor[:,:,:, tlcf.RESULT_BEGINNING_BALANCE_I].sum(dim=(0,1)) #aggregate tensor results
+    assert np.allclose(numpy_balances_total, tensor_aggbalances.cpu().numpy()), "Scenario vector balances do not match"
 
 def test_tensor_aggyieldprice():
-    # Example: 3 loans, 2 scenario
+    # Example: 1 loan, 2 scenario
     # loans_tensor: [n_loans, 3] (columns: wac, wam, pv)
     loans_tensor = torch.tensor([
-        [0.3, 12, 100],
-        [0.3, 12, 100],
         [0.3, 12, 100],
     ], dtype=torch.float64)
 
     max_wam = int(loans_tensor[:, 1].max().item())
     n_loans = loans_tensor.shape[0]
     n_scenarios = 2
-    scenarios_tensor = torch.zeros(n_scenarios, 12, max_wam)
+    scenarios_tensor = torch.zeros(n_scenarios, 14, max_wam)
 
     ### Scenario 0 ###
     # Set up refund_smm and aggMDR_timingV
@@ -129,11 +131,13 @@ def test_tensor_aggyieldprice():
     scenarios_tensor[0, tlcf.SERVICING_FEE_I, 0] = 0.02
     scenarios_tensor[0, tlcf.RECOVERY_LAG_I, 0] = 4
     scenarios_tensor[0, tlcf.REFUND_PREMIUM_I, 0] = 1.0
-    scenarios_tensor[0, tlcf.RATE_RED_I, 0] = .0001
+    scenarios_tensor[0, tlcf.RATE_RED_I, :] = 0
+    scenarios_tensor[0, tlcf.DQ_ADV_PRIN_I, :] = 0
+    scenarios_tensor[0, tlcf.DQ_ADV_INT_I, :] = 0
     ### Scenario 1 ###
     scenarios_tensor[1, tlcf.REFUND_SMM_I, :] = 0
     scenarios_tensor[1, tlcf.AGGMDR_TIMING_I, :] = 0
-    scenarios_tensor[1, tlcf.SMM_I, :] = tlcf.cpr2smm(0.15)
+    scenarios_tensor[1, tlcf.SMM_I, :] = tlcf.cpr2smm(0)
     scenarios_tensor[1, tlcf.DQ_I, :] = 0
     scenarios_tensor[1, tlcf.MDR_I, :] = 0
     scenarios_tensor[1, tlcf.SEV_I, :] = 0
@@ -142,26 +146,29 @@ def test_tensor_aggyieldprice():
     scenarios_tensor[1, tlcf.SERVICING_FEE_I, 0] = 0
     scenarios_tensor[1, tlcf.RECOVERY_LAG_I, 0] = 0
     scenarios_tensor[1, tlcf.REFUND_PREMIUM_I, 0] = 1.0
-    scenarios_tensor[1, tlcf.RATE_RED_I, 0] = .0001
+    scenarios_tensor[1, tlcf.RATE_RED_I, :] = .0001
+    scenarios_tensor[1, tlcf.DQ_ADV_PRIN_I, :] = 0
+    scenarios_tensor[1, tlcf.DQ_ADV_INT_I, :] = 0
 
     model = tlcf.LoanAmort(loans_tensor)
-    result_tensor, feature_names = model(scenarios_tensor)
+    config = tlcf.Config(rate_red_method=True)
+    result_tensor, feature_names = model(scenarios_tensor, config)
 
     print("Result shape:", result_tensor.shape)  # [n_loans, n_scenarios, max_wam+lag, n_features]
     # print(f"Result for loan 0, scenario 0:\n\t{feature_names}\n{result_tensor[0, 0]}")
-    # print(f"Result for loan 2, scenario 0:\n\t{feature_names}\n{result_tensor[2, 1]}")
 
-    ''' Price and Yield for each loan/scenario
-    yield_tensor = torch.full((n_loans, n_scenarios), 0.0667, device=loans_tensor.device)
-    price_tensor = y2p_tensor(loans_tensor, scenarios_tensor, yield_tensor)
+    # Price and Yield for each loan/scenario
+    yield_input = torch.full((n_loans, n_scenarios), 0.1, device=loans_tensor.device)
+    price_result = tlcf.y2p_tensor(loans_tensor, scenarios_tensor, yield_input, config)
 
-    target_price = torch.full((n_loans, n_scenarios), 1.061202911, device=loans_tensor.device) #1.0506307058881
-    yield_tensor = p2y_tensor(loans_tensor, scenarios_tensor, target_price)
+    price_input = torch.tensor([[1.0506307058881, 1.10881219814726]])
+    yield_result = tlcf.p2y_tensor(loans_tensor, scenarios_tensor, price_input, config)
 
-    print(f"price{price_tensor}, \nyield{yield_tensor}")
-    '''
+    print(f"price{price_result}, \nyield{yield_result}")
+    assert torch.allclose(price_result, price_input, rtol=0, atol=1e-12), "Price calculation mismatch"
+    assert torch.allclose(yield_result, yield_input, rtol=0, atol=1e-12), "Yield calculation mismatch"
 
-    # Example yield-price aggregation, when loan method: set tensor size as (n_loans,) pool method: (n_scenarios,)
+    '''    # Example yield-price aggregation, when loan method: set tensor size as (n_loans,) pool method: (n_scenarios,)
     yield_tensor = torch.full((n_scenarios,), 0.10, device=loans_tensor.device)
     price_tensor = tlcf.yield_price_aggregation(
         loans_tensor, scenarios_tensor, yield_tensor, function='y2p', method='pool'
@@ -174,7 +181,72 @@ def test_tensor_aggyieldprice():
         loans_tensor, scenarios_tensor, target_price, function='p2y', method='pool'
     )   
     print(f"Aggregated yield: {yield_tensor}")
+    '''
+
+def test_tensor_dqadvance():
+    # Example: 1 loan, 2 scenario
+    # loans_tensor: [n_loans, 3] (columns: wac, wam, pv)
+    loans_tensor = torch.tensor([
+        [0.1585, 72, 9_498_315.68],
+    ], dtype=torch.float64)
+
+    max_wam = int(loans_tensor[:, 1].max().item())
+    n_loans = loans_tensor.shape[0]
+    n_scenarios = 3
+    scenarios_tensor = torch.zeros(n_scenarios, 14, max_wam)
+
+    ### Scenario 0 ###
+    scenarios_tensor[0, tlcf.REFUND_SMM_I, :] = 0
+    scenarios_tensor[0, tlcf.AGGMDR_TIMING_I, :] = 0
+    scenarios_tensor[0, tlcf.SMM_I, :] = tlcf.cpr2smm(0.12)
+    scenarios_tensor[0, tlcf.DQ_I, :] = 0
+    
+    mdrV = tlcf.cpr2smm(torch.tensor([0, 0, 0,])) # input refund_smm values
+    scenarios_tensor[0, tlcf.MDR_I, :] = tlcf.cpr2smm(0.1) # first fill 0
+    scenarios_tensor[0, tlcf.MDR_I, :len(mdrV)] = mdrV
+
+    scenarios_tensor[0, tlcf.SEV_I, :] = 1
+    scenarios_tensor[0, tlcf.AGGMDR_I, 0] = 0
+    scenarios_tensor[0, tlcf.COMPINTHC_I, 0] = 0
+    scenarios_tensor[0, tlcf.SERVICING_FEE_I, 0] = 0
+    scenarios_tensor[0, tlcf.RECOVERY_LAG_I, 0] = 0
+    scenarios_tensor[0, tlcf.REFUND_PREMIUM_I, 0] = 0
+    scenarios_tensor[0, tlcf.RATE_RED_I, :] = 0
+    scenarios_tensor[0, tlcf.DQ_ADV_PRIN_I, :] = 0
+    scenarios_tensor[0, tlcf.DQ_ADV_INT_I, :] = 0
+
+    ### Scenario 1: dqV ###
+    scenarios_tensor[1, :, :] = scenarios_tensor[0, :, :] # copy scenario 0
+    dqV = .01 * torch.tensor([1, 2, 3])
+    scenarios_tensor[1, tlcf.DQ_I, :] = .1
+    scenarios_tensor[1, tlcf.DQ_I, :len(dqV)] = dqV
+
+    ### Scenario 2: dq adv prin and int ###
+    scenarios_tensor[2, :, :] = scenarios_tensor[1, :, :] # copy scenario 1
+    scenarios_tensor[2, tlcf.DQ_ADV_PRIN_I, :] = 0.7
+    scenarios_tensor[2, tlcf.DQ_ADV_INT_I, :] = 0.3
+
+    model = tlcf.LoanAmort(loans_tensor)
+    config = tlcf.Config(is_advance=True)
+    result_tensor, feature_names = model(scenarios_tensor, config)
+    print("Result shape:", result_tensor.shape)  # [n_loans, n_scenarios, max_wam+lag, n_features]
+
+    # Price and Yield for each loan/scenario
+    yield_input = torch.full((n_loans, n_scenarios), tlcf.bey2y(0.1), device=loans_tensor.device)
+    price_result = tlcf.y2p_tensor(loans_tensor, scenarios_tensor, yield_input, config)
+    price_input = torch.tensor([[0.9381589717, 0.9020295044, 0.92732012833]])
+
+    assert torch.allclose(price_result, price_input, rtol=0, atol=1e-8), "Advanced Price calculation mismatch"
+    print("Non-advanced Price:", price_result)
+
+    config_not_advance = tlcf.Config(is_advance=False)
+    price_result = tlcf.y2p_tensor(loans_tensor, scenarios_tensor, yield_input, config_not_advance)
+    price_input = torch.tensor([[0.93577210138, 0.87181853008, 0.90545638658]])
+
+    assert torch.allclose(price_result, price_input, rtol=0, atol=1e-8), "Non-advanced Price calculation mismatch"
+    print("Advanced Price:", price_result)
+
 
 if __name__ == '__main__':
     torch.set_printoptions(linewidth=200)
-    test_tensor_aggyieldprice()
+    test_tensor_dqadvance()
