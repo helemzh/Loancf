@@ -216,7 +216,7 @@ def getCashflow_tensor(
     # Default aggregation
     default_aggMDRV = pv.view(-1, 1) * aggMDR.view(-1, 1) * aggMDR_timingV  # [N, periods]
     dqPrin_aggMDRV = paydownV * default_aggMDRV  # [N, periods]
-    scaled_default_aggMDRV = default_aggMDRV / (balancesV[:, :-1] * p_survV + 1e-12)  # avoid div0
+    scaled_default_aggMDRV = default_aggMDRV / (balancesV[:, :-1] * p_survV + 1e-16)  # avoid div0
     cum_scaled_default_aggMDRV = torch.cumsum(scaled_default_aggMDRV, dim=1)
     survivorshipV = torch.cat([
         torch.ones(N, 1, device=device),

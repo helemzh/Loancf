@@ -5,6 +5,7 @@ from scipy.optimize import newton
 import tensor_loancf as tlcf
 import loancf as lcf
 import new_tensor_loancf as ntlcf
+import copy
 
 
 def test_compare2d_3d():
@@ -112,14 +113,14 @@ def test_tensor_aggyieldprice():
     max_wam = int(loans_tensor[:, 1].max().item())
     n_loans = loans_tensor.shape[0]
     n_scenarios = 2
-    scenarios_tensor = torch.zeros(n_scenarios, 14, max_wam)
+    scenarios_tensor = torch.zeros(n_scenarios, 14, max_wam, dtype=torch.float64)
 
     ### Scenario 0 ###
     # Set up refund_smm and aggMDR_timingV
-    refund_smm = tlcf.cpr2smm(.01 * torch.tensor([74, 15, 5, 3, 2, 1])) # input refund_smm values
+    refund_smm = tlcf.cpr2smm(.01 * torch.tensor([74, 15, 5, 3, 2, 1], dtype=torch.float64)) # input refund_smm values
     scenarios_tensor[0, tlcf.REFUND_SMM_I, :] = 0 # first fill 0
     scenarios_tensor[0, tlcf.REFUND_SMM_I, :len(refund_smm)] = refund_smm
-    aggMDR_timing = .01 * torch.tensor([23,10,10,10,10,10,8,7,5,4,2,1]) # input aggMDR_timing values
+    aggMDR_timing = .01 * torch.tensor([23,10,10,10,10,10,8,7,5,4,2,1], dtype=torch.float64) # input aggMDR_timing values
     scenarios_tensor[0, tlcf.AGGMDR_TIMING_I, :] = 0
     scenarios_tensor[0, tlcf.AGGMDR_TIMING_I, :len(aggMDR_timing)] = aggMDR_timing
     scenarios_tensor[0, tlcf.SMM_I, :] = tlcf.cpr2smm(0.35)
@@ -158,10 +159,10 @@ def test_tensor_aggyieldprice():
     # print(f"Result for loan 0, scenario 0:\n\t{feature_names}\n{result_tensor[0, 0]}")
 
     # Price and Yield for each loan/scenario
-    yield_input = torch.full((n_loans, n_scenarios), 0.1, device=loans_tensor.device)
+    yield_input = torch.full((n_loans, n_scenarios), 0.1, device=loans_tensor.device, dtype=torch.float64)
     price_result = tlcf.y2p_tensor(loans_tensor, scenarios_tensor, yield_input, config)
 
-    price_input = torch.tensor([[1.0506307058881, 1.10881219814726]])
+    price_input = torch.tensor([[1.0506307058881, 1.10881219814726]], dtype=torch.float64)
     yield_result = tlcf.p2y_tensor(loans_tensor, scenarios_tensor, price_input, config)
 
     print(f"price{price_result}, \nyield{yield_result}")
@@ -184,7 +185,7 @@ def test_tensor_aggyieldprice():
     '''
 
 def test_tensor_dqadvance():
-    # Example: 1 loan, 2 scenario
+    # Example: 1 loan, 3 scenario
     # loans_tensor: [n_loans, 3] (columns: wac, wam, pv)
     loans_tensor = torch.tensor([
         [0.1585, 72, 9_498_315.68],
@@ -193,7 +194,7 @@ def test_tensor_dqadvance():
     max_wam = int(loans_tensor[:, 1].max().item())
     n_loans = loans_tensor.shape[0]
     n_scenarios = 3
-    scenarios_tensor = torch.zeros(n_scenarios, 14, max_wam)
+    scenarios_tensor = torch.zeros(n_scenarios, 14, max_wam, dtype=torch.float64)
 
     ### Scenario 0 ###
     scenarios_tensor[0, tlcf.REFUND_SMM_I, :] = 0
@@ -201,7 +202,7 @@ def test_tensor_dqadvance():
     scenarios_tensor[0, tlcf.SMM_I, :] = tlcf.cpr2smm(0.12)
     scenarios_tensor[0, tlcf.DQ_I, :] = 0
     
-    mdrV = tlcf.cpr2smm(torch.tensor([0, 0, 0,])) # input refund_smm values
+    mdrV = tlcf.cpr2smm(torch.tensor([0, 0, 0,], dtype=torch.float64)) # input refund_smm values
     scenarios_tensor[0, tlcf.MDR_I, :] = tlcf.cpr2smm(0.1) # first fill 0
     scenarios_tensor[0, tlcf.MDR_I, :len(mdrV)] = mdrV
 
@@ -217,7 +218,7 @@ def test_tensor_dqadvance():
 
     ### Scenario 1: dqV ###
     scenarios_tensor[1, :, :] = scenarios_tensor[0, :, :] # copy scenario 0
-    dqV = .01 * torch.tensor([1, 2, 3])
+    dqV = .01 * torch.tensor([1, 2, 3], dtype=torch.float64)
     scenarios_tensor[1, tlcf.DQ_I, :] = .1
     scenarios_tensor[1, tlcf.DQ_I, :len(dqV)] = dqV
 
@@ -234,19 +235,197 @@ def test_tensor_dqadvance():
     # Price and Yield for each loan/scenario
     yield_input = torch.full((n_loans, n_scenarios), tlcf.bey2y(0.1), device=loans_tensor.device)
     price_result = tlcf.y2p_tensor(loans_tensor, scenarios_tensor, yield_input, config)
-    price_input = torch.tensor([[0.9381589717, 0.9020295044, 0.92732012833]])
+    price_input = torch.tensor([[0.9381589717, 0.9020295044, 0.92732012833]], dtype=torch.float64)
 
     assert torch.allclose(price_result, price_input, rtol=0, atol=1e-8), "Advanced Price calculation mismatch"
-    print("Non-advanced Price:", price_result)
+    print("Advanced Price:", price_result)
 
     config_not_advance = tlcf.Config(is_advance=False)
     price_result = tlcf.y2p_tensor(loans_tensor, scenarios_tensor, yield_input, config_not_advance)
-    price_input = torch.tensor([[0.93577210138, 0.87181853008, 0.90545638658]])
+    price_input = torch.tensor([[0.93577210138, 0.87181853008, 0.90545638658]], dtype=torch.float64)
 
     assert torch.allclose(price_result, price_input, rtol=0, atol=1e-8), "Non-advanced Price calculation mismatch"
-    print("Advanced Price:", price_result)
+    print("Non-advanced Price:", price_result)
+
+
+def test_ntlcf():
+    # Initial testing for ntlcf
+    N = 2 # n loans
+    M = 2 # m scenarios
+    W = 3 # max wam
+
+    orig_wacV = torch.tensor([0.06, 0.05]).repeat(W,1) # WxN
+    wam = torch.tensor([[2, 3]]) # 1xN
+    pv = torch.tensor([[100, 200]]) # 1xN
+    rate_redV = torch.tensor([[.0001], [.0002]]) + (torch.arange(W) * .0001) # MxW, broadcast 2x1 with 1x4
+
+    refund_smmV = torch.zeros((M, W)) # MxW
+    smmV = ntlcf.cpr2smm(torch.tensor([[.35],[0]]).repeat(1, W)) # MxW
+    dqV = torch.tensor([[.001],[0]]).repeat(1, W) # MxW
+    mdrV = torch.tensor([[.03], [0]]).repeat(1,W) # MxW
+    sevV = torch.vstack([torch.tensor([[.95]]) + (torch.arange(W) * .01), torch.ones(W)]) # MxW
+    aggMDR_timingV = torch.tensor([.5, .3, .1]).repeat(M, 1) # MxW
+
+    aggMDR = torch.tensor([[.03], [0]]) # Mx1
+    compIntHC = torch.tensor([[.2], [.3]]) # Mx1
+    servicing_fee = torch.tensor([[.02], [0.01]]) # Mx1
+    recovery_lag = torch.tensor([[4], [0]]) # Mx1
+    refund_premium = torch.full((M, 1), 1) # Mx1
+    dq_adv_prin = torch.full((M, 1), 0) # Mx1
+    dq_adv_int = torch.full((M, 1), 0) # Mx1
+
+    config = ntlcf.Config(agg_cf=True)
+    model = ntlcf.LoanAmort()
+    # Results in Class of tensors, all and aggregated
+    result_tensor, agg_tensor = model(config=config, orig_wacV=orig_wacV, wam=wam, pv=pv, rate_redV=rate_redV, 
+                    refund_smmV=refund_smmV, smmV=smmV, dqV=dqV, mdrV=mdrV, sevV=sevV,
+                    aggMDR_timingV=aggMDR_timingV, aggMDR=aggMDR,
+                    compIntHC=compIntHC, servicing_fee=servicing_fee,
+                    recovery_lag=recovery_lag, refund_premium=refund_premium,
+                    dq_adv_prin=dq_adv_prin, dq_adv_int=dq_adv_int)
+
+    # Aggregated price/yield
+    aggcalc = ntlcf.Calc(agg_tensor, pv, config)
+    aggyld_input = torch.full((agg_tensor.cfV.shape[0], agg_tensor.cfV.shape[1]), 0.1)
+    aggpx_result = aggcalc.y2p(aggyld_input)
+    aggpx_input = torch.tensor([[[0.914025891997]],
+                                [[0.991725183301]]])
+    assert torch.allclose(aggpx_result, aggpx_input, rtol=0, atol=1e-8), "Price mismatched"
+
+    # Non-aggregated price/yield
+    calc = ntlcf.Calc(result_tensor, pv, config)
+    yld_input = torch.full((result_tensor.cfV.shape[0], result_tensor.cfV.shape[1]), 0.1)
+    px_result = calc.y2p(yld_input)
+    px_input = torch.tensor([[[0.926778247166, 0.907649714412]],
+                            [[0.994196293031, 0.990489628436]]])
+    assert torch.allclose(px_result, px_input, rtol=0, atol=1e-8), "Price mismatched"
+
+    config2 = ntlcf.Config(mode="matched")
+    result_tensor2 = model(config=config2, orig_wacV=orig_wacV, wam=wam, pv=pv, rate_redV=rate_redV, 
+                    refund_smmV=refund_smmV, smmV=smmV, dqV=dqV, mdrV=mdrV, sevV=sevV,
+                    aggMDR_timingV=aggMDR_timingV, aggMDR=aggMDR,
+                    compIntHC=compIntHC, servicing_fee=servicing_fee,
+                    recovery_lag=recovery_lag, refund_premium=refund_premium,
+                    dq_adv_prin=dq_adv_prin, dq_adv_int=dq_adv_int)
+    calc = ntlcf.Calc(result_tensor2, pv, config2)
+    yld_input = torch.full((result_tensor2.cfV.shape[0], result_tensor2.cfV.shape[1]), 0.1)
+    px_result = calc.y2p(yld_input)
+    px_input = torch.tensor([[[0.926778247166]],
+                            [[0.990489628436]]])
+    assert torch.allclose(px_result, px_input, rtol=0, atol=1e-8), "Price mismatched"
+    
+def test_ntlcf_aggyieldprice():
+    N = 1 # n loans
+    M = 2 # m scenarios
+    W = 12 # max wam
+
+    orig_wacV = torch.tensor([0.3]).repeat(W,1) # WxN
+    wam = torch.tensor([[12]]) # 1xN
+    pv = torch.tensor([[100.]]) # 1xN
+    rate_redV = torch.tensor([[0],[0.0001]]).repeat(1, W) # MxW
+    
+    refund_smmV = torch.full((M, W), 0, dtype=torch.float64) # MxW
+    refund_smmV[0, :6] = ntlcf.cpr2smm(.01 * torch.tensor([74, 15, 5, 3, 2, 1]))
+
+    smmV = ntlcf.cpr2smm(torch.tensor([[.35],[0]]).repeat(1, W)) # MxW
+    dqV = torch.zeros((M, W)) # MxW
+    mdrV = torch.zeros((M, W)) # MxW
+    sevV = torch.tensor([[0.94],[0.]]).repeat(1, W) # MxW
+
+    aggMDR_timingV = torch.zeros((M, W)) # MxW
+    aggMDR_timingV[0, :12] = .01 * torch.tensor([23,10,10,10,10,10,8,7,5,4,2,1])
+
+    aggMDR = torch.tensor([[0.03], [0]]) # Mx1
+    compIntHC = torch.tensor([[0.2], [0]]) # Mx1
+    servicing_fee = torch.tensor([[0.02], [0]]) # Mx1
+    recovery_lag = torch.tensor([[4], [0]]) # Mx1
+    refund_premium = torch.ones((M, 1)) # Mx1
+    dq_adv_prin = torch.zeros((M, 1)) # Mx1
+    dq_adv_int = torch.zeros((M, 1)) # Mx1
+
+    config = ntlcf.Config(agg_cf=False, is_advance=False)
+    model = ntlcf.LoanAmort()
+    # Results in Class of tensors, all and aggregated
+    result_advance = model(config=config, orig_wacV=orig_wacV, wam=wam, pv=pv, rate_redV=rate_redV, 
+                   refund_smmV=refund_smmV, smmV=smmV, dqV=dqV, mdrV=mdrV, sevV=sevV,
+                   aggMDR_timingV=aggMDR_timingV, aggMDR=aggMDR,
+                   compIntHC=compIntHC, servicing_fee=servicing_fee,
+                   recovery_lag=recovery_lag, refund_premium=refund_premium,
+                   dq_adv_prin=dq_adv_prin, dq_adv_int=dq_adv_int)    
+
+    # Advanced Scenarios
+    calc = ntlcf.Calc(result_advance, pv, config)
+    yld_input = torch.full((result_advance.cfV.shape[0], result_advance.cfV.shape[1]), 0.1)
+    px_result = calc.y2p(yld_input)
+    px_input = torch.tensor([[[1.0506307058881]], [[1.10881219814726]]])
+    assert torch.allclose(px_result, px_input, rtol=0, atol=1e-8), "Price mismatched"
+    print(f" Price: {px_result}")
+
+def test_ntlcf_dqadvance():
+    N = 1 # n loans
+    M = 3 # m scenarios
+    W = 72 # max wam
+
+    orig_wacV = torch.tensor([0.1585]).repeat(W,1) # WxN
+    wam = torch.tensor([[72]]) # 1xN
+    pv = torch.tensor([[9_498_315.68]]) # 1xN
+    rate_redV = torch.zeros((M, W)) # MxW
+    
+    refund_smmV = torch.zeros((M, W)) # MxW
+    smmV = ntlcf.cpr2smm(torch.full((M, W), 0.12)) # MxW
+
+    dqV_0 = torch.full((1, W), 0) # Scenario 0: dq=0
+    dqV_1_2 = torch.full((2, W), 0.1) # Scenario 1&2: dq=.01, .02, .03, 0.1, ..., 0.1
+    dqV_1_2[:, :3] = .01 * torch.tensor([1, 2, 3])
+    dqV = torch.vstack([dqV_0, dqV_1_2])
+
+    mdrV = torch.full((M, W), ntlcf.cpr2smm(0.1)) # MxW
+    mdrV[:, :3] = 0
+    sevV = torch.ones((M,W)) # MxW
+    aggMDR_timingV = torch.zeros((M,W)) # MxW
+
+    aggMDR = torch.zeros((M, 1)) # Mx1
+    compIntHC = torch.zeros((M, 1)) # Mx1
+    servicing_fee = torch.zeros((M, 1)) # Mx1
+    recovery_lag = torch.zeros((M, 1)) # Mx1
+    refund_premium = torch.zeros((M, 1)) # Mx1
+    dq_adv_prin = torch.tensor([[0], [0], [0.7]]) # Mx1
+    dq_adv_int = torch.tensor([[0], [0], [0.3]]) # Mx1
+
+    config = ntlcf.Config(agg_cf=False, is_advance=True)
+    model = ntlcf.LoanAmort()
+    # Results in Class of tensors, all and aggregated
+    result_advance = model(config=config, orig_wacV=orig_wacV, wam=wam, pv=pv, rate_redV=rate_redV, 
+                   refund_smmV=refund_smmV, smmV=smmV, dqV=dqV, mdrV=mdrV, sevV=sevV,
+                   aggMDR_timingV=aggMDR_timingV, aggMDR=aggMDR,
+                   compIntHC=compIntHC, servicing_fee=servicing_fee,
+                   recovery_lag=recovery_lag, refund_premium=refund_premium,
+                   dq_adv_prin=dq_adv_prin, dq_adv_int=dq_adv_int)    
+
+    # Advanced Scenarios
+    calc = ntlcf.Calc(result_advance, pv, config)
+    yld_input = torch.full((result_advance.cfV.shape[0], result_advance.cfV.shape[1]), ntlcf.bey2y(0.1))
+    px_result = calc.y2p(yld_input)
+    px_input = torch.tensor([[[0.9381589717]], [[0.9020295044]], [[0.92732012833]]])
+    assert torch.allclose(px_result, px_input, rtol=0, atol=1e-8), "Advanced Price mismatched"
+    print(f"Advanced Price: {px_result}")
+
+    # Non-advanced Scenarios
+    config2 = ntlcf.Config(agg_cf=False, is_advance=False)
+    result_nonadvance = model(config=config2, orig_wacV=orig_wacV, wam=wam, pv=pv, rate_redV=rate_redV, 
+                   refund_smmV=refund_smmV, smmV=smmV, dqV=dqV, mdrV=mdrV, sevV=sevV,
+                   aggMDR_timingV=aggMDR_timingV, aggMDR=aggMDR,
+                   compIntHC=compIntHC, servicing_fee=servicing_fee,
+                   recovery_lag=recovery_lag, refund_premium=refund_premium,
+                   dq_adv_prin=dq_adv_prin, dq_adv_int=dq_adv_int)    
+    calc = ntlcf.Calc(result_nonadvance, pv, config2)
+    yld_input = torch.full((result_nonadvance.cfV.shape[0], result_nonadvance.cfV.shape[1]), ntlcf.bey2y(0.1))
+    px_result = calc.y2p(yld_input)
+    px_input = torch.tensor([[[0.93577210138]], [[0.87181853008]], [[0.90545638658]]])
+    assert torch.allclose(px_result, px_input, rtol=0, atol=1e-8), "Non-advanced Price mismatched"
+    print(f"Non-advanced Price: {px_result}")
 
 
 if __name__ == '__main__':
     torch.set_printoptions(linewidth=200)
-    test_tensor_dqadvance()
+    test_ntlcf()
