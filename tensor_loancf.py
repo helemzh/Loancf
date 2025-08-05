@@ -253,7 +253,7 @@ def getCashflow_tensor(
     refundPrinV = survivorshipV[:, :-1] * balancesV[:, 1:] * refund_smm
     schedPrinV_pad = pad_zeros(schedPrinV, periods + max_recovery_lag)
     prepayPrinV_pad = pad_zeros(prepayPrinV, periods + max_recovery_lag)
-    totalPrinV = schedPrinV_pad + prepayPrinV_pad
+    totalPrinV = schedPrinV_pad + prepayPrinV_pad + recoveryV
     compIntV = prepayPrinV * rateV * compIntHC.unsqueeze(-1)
     refundIntV = refundPrinV * rateV
     prepayPrinV = survivorshipV[:, :-1] * balancesV[:, 1:] * smmV + refundPrinV
@@ -434,12 +434,11 @@ def y2p_tensor(loans_tensor, scenarios_tensor, yield_tensor, config):
     cfV = result_tensor[..., feature_names.index("CFL")]           # [n_loans, n_scenarios, max_len]
     servicingFeeV = result_tensor[..., feature_names.index("Servicing Fee")]
     refundPrinV = result_tensor[..., feature_names.index("Refund Prin")]
-    recoveryV = result_tensor[..., feature_names.index("Recovery")]
 
     pv = loans_tensor[:, 2].unsqueeze(1)         # [n_loans, 1]
 
     # Discounted cash flows, only sum over valid periods
-    numer = torch.sum(((cfV + recoveryV - servicingFeeV) / yV), dim=-1)  # [n_loans, n_scenarios]
+    numer = torch.sum(((cfV - servicingFeeV) / yV), dim=-1)  # [n_loans, n_scenarios]
     denom = pv - torch.sum((refundPrinV / yV) * mask, dim=-1)       # [n_loans, n_scenarios]
     px = (numer / denom)
     return px
@@ -463,7 +462,6 @@ def p2y_tensor(loans_tensor, scenarios_tensor, price_tensor, config, y_init=.08)
     cfV = result_tensor[..., feature_names.index("CFL")].cpu().numpy()
     servicingFeeV = result_tensor[..., feature_names.index("Servicing Fee")].cpu().numpy()
     refundPrinV = result_tensor[..., feature_names.index("Refund Prin")].cpu().numpy()
-    recoveryV = result_tensor[..., feature_names.index("Recovery")].cpu().numpy()
     pv = loans_tensor[:, 2].cpu().numpy()
 
     yield_tensor = np.zeros((n_loans, n_scenarios))
@@ -473,13 +471,12 @@ def p2y_tensor(loans_tensor, scenarios_tensor, price_tensor, config, y_init=.08)
             cf = cfV[i, j]
             fee = servicingFeeV[i, j]
             refund = refundPrinV[i, j]
-            recovery = recoveryV[i, j]
             pv_ = float(pv[i])
             target_price = float(price_tensor[i, j].cpu().numpy())
 
             def price_func(y):
                 yV = (1 + y / 12) ** months
-                numer = np.sum((cf + recovery - fee) / yV)
+                numer = np.sum((cf - fee) / yV)
                 denom = pv_ - np.sum(refund / yV)
                 return numer / denom - target_price
 
