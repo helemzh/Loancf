@@ -74,7 +74,9 @@ class Scenario:
     servicing_fee: float=0.0
 
     def __post_init__(self):
-        """Initialize optional arrays to zeros if not provided"""
+        """
+        Initialize optional arrays to zeros if not provided
+        """
         if self.refund_smm is None:
             self.refund_smm = np.zeros_like(self.smmV)  # Zero array matching smmV shape
         if self.aggMDR_timingV is None:
@@ -116,12 +118,11 @@ class Loan:
         refund_smm = scenario.refund_smm
         refund_premium = scenario.refund_premium
         #dqMdrV = dqV + mdrV  # dqV is additional, separating the use of dq and mdr
-
-        '''
+        """
         Most vectors are wam length.
         survivorship, balances, and specifically noted balance (len: wam + 1)
         relating to servicing fee (len: wam + lag)
-        '''
+        """
         wacV = wac - rate_redV
         rate = wac/12
         rateV = wacV / 12

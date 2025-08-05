@@ -1,10 +1,11 @@
-# Copyright (c) 2024 Helen Zhang <zhangdhelen@gmail.com>
+# Copyright (c) 2025 Helen Zhang <zhangdhelen@gmail.com>
 # Distributed under the BSD 3-Clause License
 
 import numpy_financial as npf
 import numpy as np
 import torch
 from scipy.optimize import newton
+from dataclasses import dataclass
 
 # Loan tensor index constants
 L_WAC_I = 0
@@ -147,16 +148,12 @@ def pad_recovery_lag(v, recovery_lag, max_len=None):
     return out
 
 
+@dataclass
 class Config:
-    def __init__(self, 
-                mode: str = "exhaustive",
-                servicing_fee_method: str = "avg", 
-                rate_red_method: bool = False, 
-                is_advance: bool = False):
-        self.mode = mode                                  # "exhaustive" or "matched" 
-        self.servicing_fee_method = servicing_fee_method  # "avg" or "beg"
-        self.rate_red_method = rate_red_method            # default False = unfixed rate
-        self.is_advance = is_advance                      # False unless otherwise
+    mode: str = "exhaustive"                   # "exhaustive" or "matched" 
+    servicing_fee_method: str = "avg"          # "avg" or "beg"
+    rate_red_method: bool = False              # default False = unfixed rate
+    is_advance: bool = False                  # False unless otherwise
 
 
 def getCashflow_tensor(
@@ -165,10 +162,12 @@ def getCashflow_tensor(
 ):
     """
     All arguments are torch tensors.
-    wac, wam, pv: [N]
-    rate_redV, smmV, dqV, mdrV, sevV, refund_smm, aggMDR_timingV: [N, periods]
-    recovery_lag, refund_premium, aggMDR, compIntHC, servicing_fee: [N] or scalars
-    Returns: dict of tensors, each [N, periods+lag]
+    Args: 
+        wac, wam, pv: [N]
+        rate_redV, smmV, dqV, mdrV, sevV, refund_smm, aggMDR_timingV: [N, periods]
+        recovery_lag, refund_premium, aggMDR, compIntHC, servicing_fee: [N] or scalars
+    Returns: 
+        dict of tensors, each [N, periods+lag]
     """
     N, periods = smmV.shape
 
@@ -254,7 +253,7 @@ def getCashflow_tensor(
     refundPrinV = survivorshipV[:, :-1] * balancesV[:, 1:] * refund_smm
     schedPrinV_pad = pad_zeros(schedPrinV, periods + max_recovery_lag)
     prepayPrinV_pad = pad_zeros(prepayPrinV, periods + max_recovery_lag)
-    totalPrinV = schedPrinV_pad + prepayPrinV_pad + recoveryV
+    totalPrinV = schedPrinV_pad + prepayPrinV_pad
     compIntV = prepayPrinV * rateV * compIntHC.unsqueeze(-1)
     refundIntV = refundPrinV * rateV
     prepayPrinV = survivorshipV[:, :-1] * balancesV[:, 1:] * smmV + refundPrinV
@@ -315,7 +314,8 @@ def getCashflow_tensor(
 class LoanAmort(torch.nn.Module):
     def __init__(self, loans_tensor):
         """
-        loans_tensor: [n_loans, 3] (columns: wac, wam, pv)
+        Args:
+            loans_tensor: [n_loans, 3] (columns: wac, wam, pv)
         """
         super().__init__()
         self.loans_tensor = loans_tensor
@@ -324,13 +324,15 @@ class LoanAmort(torch.nn.Module):
 
     def forward(self, scenarios_tensor, config):
         """
-        scenarios_tensor: [n_scenarios, n_attributes, max_wam]
-        mode: "exhaustive" or "matched"
-        servicing_fee_method: "avg" or "beg"
-        rate_red_method: True or False (unfixed or fixed rate)
-        is_advance: bool
-        n_vectors: [smm, dq, mdr, sev, refund_smm, aggMDR, aggMDR_timingV, compIntHC, servicing_fee]
-        Returns: [n_loans, n_scenarios, max_wam+lag, n_features]
+        Args:
+            scenarios_tensor: [n_scenarios, n_attributes, max_wam]
+            mode: "exhaustive" or "matched"
+            servicing_fee_method: "avg" or "beg"
+            rate_red_method: True or False (unfixed or fixed rate)
+            is_advance: bool
+            n_vectors: [smm, dq, mdr, sev, refund_smm, aggMDR, aggMDR_timingV, compIntHC, servicing_fee]
+        Returns: 
+            [n_loans, n_scenarios, max_wam+lag, n_features]
         """
         n_scenarios, n_vectors, max_wam = scenarios_tensor.shape
         n_loans = self.n_loans
@@ -402,10 +404,13 @@ class LoanAmort(torch.nn.Module):
 def y2p_tensor(loans_tensor, scenarios_tensor, yield_tensor, config):
     """
     Vectorized yield-to-price for all loans and scenarios, using each loan/scenario's actual wam+lag.
-    loans_tensor: [n_loans, 3]
-    scenarios_tensor: [n_scenarios, n_vectors, max_wam]
-    yield_tensor: [n_loans, n_scenarios] (annualized yield)
-    Returns: price_tensor [n_loans, n_scenarios]
+    Args:
+        loans_tensor: [n_loans, 3]
+        scenarios_tensor: [n_scenarios, n_vectors, max_wam]
+        yield_tensor: [n_loans, n_scenarios] (annualized yield)
+        config: Config object
+    Returns: 
+        price_tensor: [n_loans, n_scenarios]
     """
     n_loans, _ = loans_tensor.shape
     n_scenarios = scenarios_tensor.shape[0]
@@ -429,21 +434,25 @@ def y2p_tensor(loans_tensor, scenarios_tensor, yield_tensor, config):
     cfV = result_tensor[..., feature_names.index("CFL")]           # [n_loans, n_scenarios, max_len]
     servicingFeeV = result_tensor[..., feature_names.index("Servicing Fee")]
     refundPrinV = result_tensor[..., feature_names.index("Refund Prin")]
+    recoveryV = result_tensor[..., feature_names.index("Recovery")]
 
     pv = loans_tensor[:, 2].unsqueeze(1)         # [n_loans, 1]
 
     # Discounted cash flows, only sum over valid periods
-    numer = torch.sum(((cfV - servicingFeeV) / yV), dim=-1)  # [n_loans, n_scenarios]
+    numer = torch.sum(((cfV + recoveryV - servicingFeeV) / yV), dim=-1)  # [n_loans, n_scenarios]
     denom = pv - torch.sum((refundPrinV / yV) * mask, dim=-1)       # [n_loans, n_scenarios]
     px = (numer / denom)
     return px
 
 def p2y_tensor(loans_tensor, scenarios_tensor, price_tensor, config, y_init=.08):
     """
-    loans_tensor: [n_loans, 3] (wac, wam, pv)
-    scenarios_tensor: [n_scenarios, n_vectors, max_wam]
-    price_tensor: [n_loans, n_scenarios]
-    Returns: yield_tensor [n_loans, n_scenarios]
+    Args:
+        loans_tensor: [n_loans, 3] (wac, wam, pv)
+        scenarios_tensor: [n_scenarios, n_vectors, max_wam]
+        price_tensor: [n_loans, n_scenarios]
+        config: Config object
+    Returns: 
+        yield_tensor [n_loans, n_scenarios]
     """
     n_loans, n_scenarios = price_tensor.shape
     model = LoanAmort(loans_tensor)
@@ -454,6 +463,7 @@ def p2y_tensor(loans_tensor, scenarios_tensor, price_tensor, config, y_init=.08)
     cfV = result_tensor[..., feature_names.index("CFL")].cpu().numpy()
     servicingFeeV = result_tensor[..., feature_names.index("Servicing Fee")].cpu().numpy()
     refundPrinV = result_tensor[..., feature_names.index("Refund Prin")].cpu().numpy()
+    recoveryV = result_tensor[..., feature_names.index("Recovery")].cpu().numpy()
     pv = loans_tensor[:, 2].cpu().numpy()
 
     yield_tensor = np.zeros((n_loans, n_scenarios))
@@ -463,12 +473,13 @@ def p2y_tensor(loans_tensor, scenarios_tensor, price_tensor, config, y_init=.08)
             cf = cfV[i, j]
             fee = servicingFeeV[i, j]
             refund = refundPrinV[i, j]
+            recovery = recoveryV[i, j]
             pv_ = float(pv[i])
             target_price = float(price_tensor[i, j].cpu().numpy())
 
             def price_func(y):
                 yV = (1 + y / 12) ** months
-                numer = np.sum((cf - fee) / yV)
+                numer = np.sum((cf + recovery - fee) / yV)
                 denom = pv_ - np.sum(refund / yV)
                 return numer / denom - target_price
 
@@ -491,13 +502,15 @@ def yield_price_aggregation(
     y_init=0.05
 ):
     """
-    loans_tensor: [n_loans, 3]
-    scenarios_tensor: [n_scenarios, n_vectors, max_wam]
-    value_tensor: [n_loans, n_scenarios] or [n_scenarios] or [n_loans] (yield or price)
-    function: 'y2p' or 'p2y'
-    method: 'pool' or 'loan'
-    y_init: initial guess for yield (for p2y)
-    Returns: [n_scenarios] for pool, [n_loans] for loan (1-to-1)
+    Args:
+        loans_tensor: [n_loans, 3]
+        scenarios_tensor: [n_scenarios, n_vectors, max_wam]
+        value_tensor: [n_loans, n_scenarios] or [n_scenarios] or [n_loans] (yield or price)
+        function: 'y2p' or 'p2y'
+        method: 'pool' or 'loan'
+        y_init: initial guess for yield (for p2y)
+    Returns: 
+        [n_scenarios] for pool, [n_loans] for loan (1-to-1)
     """
     model = LoanAmort(loans_tensor)
     result_tensor, feature_names = model(scenarios_tensor)  # [n_loans, n_scenarios, periods, n_features]

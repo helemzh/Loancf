@@ -1,9 +1,10 @@
-# Copyright (c) 2024 Helen Zhang <zhangdhelen@gmail.com>
+# Copyright (c) 2025 Helen Zhang <zhangdhelen@gmail.com>
 # Distributed under the BSD 3-Clause License
 
 import numpy_financial as npf
 import numpy as np
 import torch
+from collections import OrderedDict
 from scipy.optimize import newton
 from dataclasses import dataclass
 
@@ -11,77 +12,67 @@ torch.set_default_dtype(torch.float64)
 torch.set_printoptions(precision=12, linewidth=200)
 
 cpr2smm = lambda cpr: 1-(1-cpr)**(1/12)
-
 # Bond equivalent yield
 bey2y = lambda y: 12 * ((1 + y / 2) ** (1 / 6) - 1)
 y2bey = lambda y: 2 *((1 + y/12) ** 6 - 1)
 
-def pad_columns(tensor, target_cols, pad_mode='zero'):
+def pad_rows(tensor, target_rows, pad_mode='zero'):
     """
-    Pads the columns of a 2D tensor to target_cols by adding padding values either
-    as zeros or repeating the last value of each row.
+    Pads the rows of a 2D tensor to target_rows by adding padding values either
+    as zeros or repeating the last value of each column.
 
     Args:
         tensor (torch.Tensor): Input tensor of shape (M, W)
-        target_cols (int): Target number of columns after padding
-        pad_mode (str): 'zero' to pad with zeros (default), 'last' to pad with last value per row
+        target_rows (int): Target number of rows after padding
+        pad_mode (str): 'zero' to pad with zeros (default), 'last' to pad with last value per column
 
     Returns:
-        torch.Tensor: Padded tensor of shape (M, target_cols)
+        torch.Tensor: Padded tensor of shape (target_rows, W)
     """
     M, W = tensor.shape
-    C = target_cols - W
-    if C <= 0:
-        return tensor[:, :target_cols]  # truncate if needed
-    
+    R = target_rows - M
+    if R <= 0:
+        return tensor[:target_rows, :]  # truncate if needed
+
     if pad_mode == 'zero':
-        pad = torch.zeros(M, C, dtype=tensor.dtype, device=tensor.device)
+        pad = torch.zeros(R, W, dtype=tensor.dtype, device=tensor.device)
     elif pad_mode == 'last':
-        last_vals = tensor[:, -1].unsqueeze(1)
-        pad = last_vals.repeat(1, C)
+        last_vals = tensor[-1, :].unsqueeze(0)
+        pad = last_vals.repeat(R, 1)
     else:
         raise ValueError(f"Unsupported pad_mode: {pad_mode}. Use 'zero' or 'last'.")
 
-    return torch.cat([tensor, pad], dim=1)
+    return torch.cat([tensor, pad], dim=0)
 
 def pad_recovery_lag(v: torch.Tensor, recovery_lag: torch.Tensor, max_len: int = None) -> torch.Tensor:
     """
-    Pads each 'row' along dimension 1 (WL) by different left padding amounts given in recovery_lag per batch item.
+    Pads along dimension 1 (WL) by different left padding amounts given in recovery_lag per scenario (M) for each loan (N).
 
     Args:
-        v (torch.Tensor): Input tensor of shape (M, WL, N)
-        recovery_lag (torch.Tensor): Tensor of shape (M, 1) or (M,), with non-negative integers for left-pad size per batch
+        v (torch.Tensor): Input tensor of shape (N, WL, M)
+        recovery_lag (torch.Tensor): Tensor of shape (1, M) or (M,), with non-negative integers for left-pad size per scenario
         max_len (int, optional): Output length along dim=1. If None, defaults to WL
 
     Returns:
-        torch.Tensor: Output tensor of shape (M, WL, N), with zeros left-padded per batch according to recovery_lag.
+        torch.Tensor: Output tensor of shape (N, WL, M), with zeros left-padded per scenario according to recovery_lag.
     """
-    M, WL, N = v.shape
+    N, WL, M = v.shape
+    # Ensure recovery_lag shape is (M,)
     recovery_lag = recovery_lag.view(-1).type(torch.int64)  # shape (M,)
-    assert recovery_lag.shape[0] == M, "recovery_lag should have the same batch size as v"
+    assert recovery_lag.shape[0] == M, "recovery_lag should have the same number of scenarios as v's last dim"
 
     if max_len is None:
         max_len = WL
 
-    out = torch.zeros((M, max_len, N), dtype=v.dtype, device=v.device)
+    out = torch.zeros((N, max_len, M), dtype=v.dtype, device=v.device)
 
-    # Source indices along dim=1 (length dimension)
-    src_idx = torch.arange(WL, device=v.device).unsqueeze(0).expand(M, WL)  # shape (M, WL)
-    # Destination indices = lag + source indices
-    tgt_idx = src_idx + recovery_lag.unsqueeze(1)  # shape (M, WL)
+    # For each scenario m, pad all loans n the same way
+    for m in range(M):
+        lag = recovery_lag[m].item()
+        valid_len = WL - max(lag, 0)
+        if valid_len > 0:
+            out[:, lag:lag+valid_len, m] = v[:, :valid_len, m]
 
-    # Mask valid target positions (within max_len)
-    valid_mask = tgt_idx < max_len
-
-    # Batch indices for advanced indexing
-    batch_idx = torch.arange(M, device=v.device).unsqueeze(1).expand(M, WL)  # (M, WL)
-
-    # Use only valid positions for assignment
-    batch_idx_valid = batch_idx[valid_mask]
-    tgt_idx_valid = tgt_idx[valid_mask]
-    src_idx_valid = src_idx[valid_mask]
-
-    out[batch_idx_valid, tgt_idx_valid, :] = v[batch_idx_valid, src_idx_valid, :]
     return out
 
 
@@ -108,7 +99,7 @@ class ResultTensor:
     b_balanceV: torch.Tensor
     actualBalanceV: torch.Tensor
     cfV: torch.Tensor
-    netcfV: torch.Tensor
+    netCfV: torch.Tensor
     totalDefaultV: torch.Tensor
 
 
@@ -117,14 +108,16 @@ class LoanAmort(torch.nn.Module):
         super().__init__()
 
     def agg_tensor(result_tensor):
-        # Aggregate all members except 'months' by summing across dim=2 (loans), keep dim
+        """
+        Aggregates all members of a ResultTensor object except 'months' by summing across dim=0 (loans) while keep dim
+        """
         agg_fields = {}
         for field in result_tensor.__dataclass_fields__:
             val = getattr(result_tensor, field)
             if field == "months":
                 agg_fields[field] = val
             else:
-                agg_fields[field] = val.sum(dim=2, keepdim=True)
+                agg_fields[field] = val.sum(dim=0, keepdim=True)
         return ResultTensor(**agg_fields)
 
     def forward(
@@ -132,102 +125,100 @@ class LoanAmort(torch.nn.Module):
             aggMDR_timingV, aggMDR, compIntHC, servicing_fee, recovery_lag, 
             refund_premium, dq_adv_prin, dq_adv_int):
         """
+        Takes in loan and scenario torch.tensors to calculate cashflow and result tensors
+
         Args:
-            wacV: [W, N]
-            wam: [1, N]
-            pv: [1, N]
-            rate_redV: [M, W]
-            refund_smmV, smmV, dqV, mdrV, sevV, aggMDR_timingV: [M, W]
-            aggMDR, compIntHC, servicing_fee, recovery_lag, refund_premium, dq_adv_prin, dq_adv_int: [M, 1]
+            orig_wacV: [N, W]
+            wam, pc: [N, 1]
+            rate_redV, refund_smmV, smmV, dqV, mdrV, sevV, aggMDR_timingV: [W, M]
+            aggMDR, compIntHC, servicing_fee, recovery_lag, refund_premium, dq_adv_prin, dq_adv_int: [1, M]
 
-        Returns: result_tensor [N_loans, M_scenarios, WL_max_wam+lag, n_features]
+        Returns: ResultTensor Object with n_feature tensors of size [N, WL, M]
         """
-
-        N = wam.shape[1]
-        M = smmV.shape[0]
-        W = torch.max(wam)
-        WL = int(torch.max(wam) + torch.max(recovery_lag))
+        N, W = orig_wacV.shape
+        M = smmV.shape[1]
+        WL = int(torch.max(wam).item() + torch.max(recovery_lag).item())
 
         # pad tensors with shape W to WL (max wam + max recovery_lag) with zeros
         if WL != W:
-            wacV = torch.cat([orig_wacV, torch.zeros(WL - W, N)], dim=0) # [WL, N]
-            rate_redV = pad_columns(rate_redV, WL) # [M, WL]
-            refund_smmV = pad_columns(refund_smmV, WL) # [M, WL]
-            smmV = pad_columns(smmV, WL) # [M, WL]
-            dqV = pad_columns(dqV, WL) # [M, WL]
-            mdrV = pad_columns(mdrV, WL) # [M, WL]
-            sevV = pad_columns(sevV, WL, pad_mode='last') # [M, WL]
-            aggMDR_timingV = pad_columns(aggMDR_timingV, WL) # [M, WL]
+            wacV = torch.cat([orig_wacV, torch.zeros(N, WL - W)], dim=1) # [N, WL]
+            rate_redV = pad_rows(rate_redV, WL) # [WL, M]
+            refund_smmV = pad_rows(refund_smmV, WL) # [WL, M]
+            smmV = pad_rows(smmV, WL) # [WL, M]
+            dqV = pad_rows(dqV, WL) # [WL, M]
+            mdrV = pad_rows(mdrV, WL) # [WL, M]
+            sevV = pad_rows(sevV, WL, pad_mode='last') # [WL, M]
+            aggMDR_timingV = pad_rows(aggMDR_timingV, WL) # [WL, M]
         else:
             wacV = orig_wacV
-        wacV = wacV.unsqueeze(0) - rate_redV.unsqueeze(2) # [M, WL, N]
-        rateV = wacV / 12
+        wacV = wacV.unsqueeze(2) - rate_redV.unsqueeze(0) # [N, WL, M]
+        rateV = wacV / 12 # [N, WL, M]
 
         # Unfixed rate amortization
-        exponent= torch.clamp(wam - torch.arange(WL).unsqueeze(1), min=1) # [M, N, WL], clamp 1 to avoid 0 in denominator for alpha
-        alpha = rateV / ((1+rateV)**exponent - 1) 
-        alpha = torch.cat([torch.zeros(M, 1, N), alpha], dim=1) # [M, WL+1, N], concat 0 to dimension 1
-        balancesV = torch.nan_to_num(pv.repeat(WL+1,1) * torch.cumprod(1-alpha, dim=1)) # [M, WL+1, N]
+        exponent= torch.clamp(wam - torch.arange(WL).unsqueeze(0), min=1) # [N, WL], clamp 1 to avoid 0 in denominator for alpha
+        alpha = rateV / ((1+rateV)**exponent.unsqueeze(2) - 1) 
+        alpha = torch.cat([torch.zeros(N, 1, M), alpha], dim=1) # [N, WL+1, M], concat 0 to dimension 1
+        balancesV = torch.nan_to_num(pv.repeat(1, WL+1).unsqueeze(2) * torch.cumprod(1-alpha, dim=1)) # [N, WL+1, M]
         balancesV[torch.abs(balancesV) <= 1e-12] = 0.0
-        principalsV = balancesV[:, :-1] - balancesV[:, 1:] # [M, WL, N]
-        interestsV = balancesV[:, :-1] * rateV # [M, WL, N]
-        paydownV = torch.nan_to_num(principalsV / balancesV[:, :-1]) # [M, WL, N]
+        principalsV = balancesV[:, :-1, :] - balancesV[:, 1:, :] # [N, WL, M]
+        interestsV = balancesV[:, :-1, :] * rateV # [N, WL, M]
+        paydownV = torch.nan_to_num(principalsV / balancesV[:, :-1, :]) # [N, WL, M]
 
-        p_survV = torch.cumprod(1 - smmV - refund_smmV - mdrV, dim=1) # [M, WL]
-        default_aggMDRV = pv.view(1, 1, N) * aggMDR.view(M, 1, 1) * aggMDR_timingV.view(M, WL, 1) # [M, WL, N]
-        dqPrin_aggMDRV = paydownV * default_aggMDRV # [M, WL, N]
-        scaled_default_aggMDRV = default_aggMDRV / (balancesV[:, :-1] * p_survV.unsqueeze(2) + 1e-16) # [M, WL, N]
-        cum_scaled_default_aggMDRV = torch.cumsum(scaled_default_aggMDRV, dim=1) # [M, WL, N]
+        p_survV = torch.cumprod(1 - smmV - refund_smmV - mdrV, dim=0) # [WL, M]
+        default_aggMDRV = pv.view(N, 1, 1) * aggMDR.view(1, 1, M) * aggMDR_timingV.view(1, WL, M) # [N, WL, M]
+        dqPrin_aggMDRV = paydownV * default_aggMDRV # [N, WL, M]
+        scaled_default_aggMDRV = default_aggMDRV / (balancesV[:, :-1, :] * p_survV.unsqueeze(0) + 1e-16) # [N, WL, M]
+        cum_scaled_default_aggMDRV = torch.cumsum(scaled_default_aggMDRV, dim=1) # [N, WL, M]
         survivorshipV = torch.cat([
-            torch.ones(M, 1, N),
-            p_survV.unsqueeze(2) * (1 - cum_scaled_default_aggMDRV)
-        ], dim=1) # [M, WL+1, N]
+            torch.ones(N, 1, M),
+            p_survV.unsqueeze(0) * (1 - cum_scaled_default_aggMDRV)
+        ], dim=1) # [N, WL+1, M]
         
         # Balances
-        actualBalanceV = survivorshipV * balancesV # [M, WL+1, N]
-        b_balanceV = actualBalanceV[:, :-1] # [M, WL, N], starts with month 0
-        actualBalanceV = actualBalanceV[:, 1:] # [M, WL, N], starts with month 1
+        actualBalanceV = survivorshipV * balancesV # [N, WL+1, M]
+        b_balanceV = actualBalanceV[:, :-1, :] # [N, WL, M], starts with month 0
+        actualBalanceV = actualBalanceV[:, 1:, :] # [N, WL, M], starts with month 1
 
         # Scheduled Principals
-        schedDQPrinV = survivorshipV[:, :-1] * principalsV * (1-mdrV.unsqueeze(2)) * dqV.unsqueeze(2) * (1-dq_adv_prin.unsqueeze(2)) # [M, WL, N]
-        schedDefaultPrinV = survivorshipV[:, :-1] * principalsV * mdrV.unsqueeze(2) + dqPrin_aggMDRV # [M, WL, N]
+        schedDQPrinV = survivorshipV[:, :-1, :] * principalsV * (1-mdrV.unsqueeze(0)) * dqV.unsqueeze(0) * (1-dq_adv_prin.unsqueeze(0)) # [N, WL, M]
+        schedDefaultPrinV = survivorshipV[:, :-1, :] * principalsV * mdrV.unsqueeze(0) + dqPrin_aggMDRV # [N, WL, M]
 
-        schedPrinV = survivorshipV[:, :-1] * principalsV - schedDQPrinV - schedDefaultPrinV # [M, WL, N]
-        prepayPrinV = survivorshipV[:, :-1] * balancesV[:, 1:] * smmV.unsqueeze(2) # [M, WL, N]
+        schedPrinV = survivorshipV[:, :-1, :] * principalsV - schedDQPrinV - schedDefaultPrinV # [N, WL, M]
+        prepayPrinV = survivorshipV[:, :-1, :] * balancesV[:, 1:, :] * smmV.unsqueeze(0) # [N, WL, M]
         
         # Losses, recoveries, and writedowns
-        defaultV = b_balanceV * mdrV.unsqueeze(2) + default_aggMDRV # [M, WL, N]
-        writeDownV = pad_recovery_lag(defaultV, recovery_lag) # [M, WL, N]
-        recoveryV = writeDownV * (1-sevV.unsqueeze(2)) # [M, WL, N]
+        defaultV = b_balanceV * mdrV.unsqueeze(0) + default_aggMDRV # [N, WL, M]
+        writeDownV = pad_recovery_lag(defaultV, recovery_lag) # [N, WL, M]
+        recoveryV = writeDownV * (1-sevV.unsqueeze(0)) # [N, WL, M]
 
         # Principals
-        refundPrinV = survivorshipV[:, :-1] * balancesV[:, 1:] * refund_smmV.unsqueeze(2) # [M, WL, N]
-        totalPrinV = schedPrinV + prepayPrinV + recoveryV # [M, WL, N]
-        compIntV = prepayPrinV * rateV * compIntHC.unsqueeze(2) # [M, WL, N]
-        refundIntV = refundPrinV * rateV # [M, WL, N]
-        prepayPrinV = survivorshipV[:, :-1] * balancesV[:, 1:] * smmV.unsqueeze(2) + refundPrinV # [M, WL, N]
+        refundPrinV = survivorshipV[:, :-1, :] * balancesV[:, 1:, :] * refund_smmV.unsqueeze(0) # [N, WL, M]
+        totalPrinV = schedPrinV + prepayPrinV + recoveryV # [N, WL, M]
+        compIntV = prepayPrinV * rateV * compIntHC.unsqueeze(0) # [N, WL, M]
+        refundIntV = refundPrinV * rateV # [N, WL, M]
+        prepayPrinV = survivorshipV[:, :-1, :] * balancesV[:, 1:, :] * smmV.unsqueeze(0) + refundPrinV # [N, WL, M]
 
         # Servicing Fee
-        defaultBalV = torch.clamp(torch.cumsum(defaultV - writeDownV, dim=1), min=0) # [M, WL, N]
-        b_totalBalV = b_balanceV + torch.cat([torch.zeros(M, 1, N), defaultBalV[:, :-1]], dim=1) # [M, WL, N]
-        totalBalV = actualBalanceV + defaultBalV # [M, WL, N]
-        servicingFee_rate = servicing_fee.unsqueeze(2) / 12 # [M, 1]
-        servicingFee_begV = b_totalBalV * servicingFee_rate # [M, WL, N]
-        servicingFee_avgV = ((b_totalBalV + totalBalV) / 2) * servicingFee_rate # [M, WL, N]
+        defaultBalV = torch.clamp(torch.cumsum(defaultV - writeDownV, dim=1), min=0) # [N, WL, M]
+        b_totalBalV = b_balanceV + torch.cat([torch.zeros(N, 1, M), defaultBalV[:, :-1, :]], dim=1) # [N, WL, M]
+        totalBalV = actualBalanceV + defaultBalV # [N, WL, M]
+        servicingFee_rate = servicing_fee.unsqueeze(0) / 12 # [M, 1]
+        servicingFee_begV = b_totalBalV * servicingFee_rate # [N, WL, M]
+        servicingFee_avgV = ((b_totalBalV + totalBalV) / 2) * servicingFee_rate # [N, WL, M]
         servicingFeeV = servicingFee_avgV if config.servicing_fee_method == 'avg' else servicingFee_begV
 
         actInterestV = rateV * b_balanceV if config.is_advance else (
-            rateV * (b_balanceV * (1 - (1-mdrV.unsqueeze(2)) * dqV.unsqueeze(2) * (1-dq_adv_int.unsqueeze(2)) - mdrV.unsqueeze(2)) - default_aggMDRV) - compIntV)
-        actInterestV -= refundIntV # [M, WL, N]
+            rateV * (b_balanceV * (1 - (1-mdrV.unsqueeze(0)) * dqV.unsqueeze(0) * (1-dq_adv_int.unsqueeze(0)) - mdrV.unsqueeze(0)) - default_aggMDRV) - compIntV)
+        actInterestV -= refundIntV # [N, WL, M]
 
-        cfV = totalPrinV + actInterestV # [M, WL, N]
-        netCfV = torch.clamp(cfV - servicingFeeV, min=0) # [M, WL, N]
-        totalDefaultV = schedDQPrinV + schedDefaultPrinV + defaultV # [M, WL, N]
+        cfV = totalPrinV + actInterestV # [N, WL, M]
+        netCfV = torch.clamp(cfV - servicingFeeV, min=0) # [N, WL, M]
+        totalDefaultV = schedDQPrinV + schedDefaultPrinV + defaultV # [N, WL, M]
 
-        months = torch.arange(1, WL+1).unsqueeze(1).expand(M, WL, N) # [M, WL, N]
+        months = torch.arange(1, WL+1).unsqueeze(1).expand(N, WL, M) # [N, WL, M]
 
         if config.mode == "matched":
-            # For each tensor of shape [M, WL, N], select [i, :, i] for i in range(N)
+            # For each tensor of shape [N, WL, M], select [i, :, i] for i in range(N)
             def diag3d(tensor):
                 idx = torch.arange(N)
                 return tensor[idx, :, idx].unsqueeze(-1)  # [N, WL]
@@ -265,16 +256,16 @@ class Calc():
         self.config = config
 
     def y2p(self, y):
-        M, WL, N = self.result_tensor.cfV.shape
-        yV = (1 + y/12)**torch.arange(1, WL + 1) # [M, WL]
-        if N == 1 and self.config.mode != "matched":
-            pv = torch.sum(self.pv).expand(M, N, 1)
+        N, WL, M = self.result_tensor.cfV.shape
+        yV = (1 + y/12)**torch.arange(1, WL + 1) # [N, WL]
+        if self.config.agg_cf and self.config.mode != "matched" and N == 1:
+            pv = torch.sum(self.pv).expand(N, 1, M) # [1, 1, M]
         elif self.config.mode == "matched":
-            pv = self.pv.reshape(2, 1, 1)
+            pv = self.pv.reshape(N, 1, 1) # [N, 1, 1]
         else:
-            pv = self.pv.unsqueeze(1).expand(M, 1, N)
-        px = torch.sum((self.result_tensor.cfV - self.result_tensor.servicingFeeV) / yV.unsqueeze(2), dim=1, keepdim=True) / (pv - torch.sum(self.result_tensor.refundPrinV / yV.unsqueeze(2), dim=1, keepdim=True)) # [M, 1, N]
-        return px # [M, 1, N] price tensor
+            pv = self.pv.unsqueeze(1).expand(N, 1, M) # [N, 1, M]
+        px = torch.sum((self.result_tensor.cfV - self.result_tensor.servicingFeeV) / yV.unsqueeze(2), dim=1, keepdim=True) / (pv - torch.sum(self.result_tensor.refundPrinV / yV.unsqueeze(2), dim=1, keepdim=True)) # [N, 1, M]
+        return px # [N, 1, M] price tensor
     
     def p2y(self, px, y_init=0.8):
         # change to numpy arrays
@@ -294,7 +285,7 @@ class Calc():
                 cf = cfV[i, :, j]
                 fee = servicingFeeV[i, :, j]
                 refund = refundPrinV[i, :, j]
-                pv_ = float(np.sum(pv)) if m_scenarios == 1 else float(pv[0, j].item())
+                pv_ = float(np.sum(pv)) if m_scenarios == 1 else float(pv[j, 0].item())
                 target_price = float(px[i, 0, j].cpu().numpy())
 
                 def price_func(y):
@@ -309,8 +300,8 @@ class Calc():
                     y = np.nan
                 yield_tensor[i, j] = y
 
-        return torch.tensor(yield_tensor, dtype=torch.float64, device=result_tensor.cfV.device)
+        return torch.tensor(yield_tensor, dtype=torch.float64) # [N, M]
 
     def accr_int(wacV, rate_redV, settle_day):
-        wacV = wacV.unsqueeze(0) - rate_redV.unsqueeze(2)
+        wacV = wacV.unsqueeze(2) - rate_redV.unsqueeze(0)
         return wacV * (settle_day - 1) / 360
