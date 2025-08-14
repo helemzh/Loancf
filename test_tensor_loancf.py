@@ -8,6 +8,7 @@ from scipy.optimize import newton
 import tensor_loancf as tlcf
 import loancf as lcf
 import new_tensor_loancf as ntlcf
+from collections import OrderedDict
 
 
 """
@@ -323,7 +324,7 @@ def test_ntlcf():
     px_input = torch.tensor([[[0.926778247166]], [[0.990489628436]]])
     assert torch.allclose(px_result, px_input, rtol=0, atol=1e-8), "Price mismatched"
     
-def test_ntlcf_aggyieldprice():
+def test_ntlcf_yieldprice():
     N = 1 # n loans
     M = 2 # m scenarios
     W = 12 # max wam
@@ -435,6 +436,62 @@ def test_ntlcf_dqadvance():
     print(f"Non-advanced Price: {px_result}")
 
 
+def test_tranche():
+    """
+    Example aggegrated collateral from test_ntlcf() for tranche
+    """
+    N = 2 # n loans
+    M = 2 # m scenarios
+    W = 3 # max wam
+
+    orig_wacV = torch.tensor([[0.06], [0.05]]).repeat(1, W)  # [N, W]
+    wam = torch.tensor([[2], [3]])  # [N, 1]
+    pv = torch.tensor([[100.], [200.]])  # [N, 1]
+    rate_redV = (torch.tensor([.0001, .0002]) + (torch.arange(W).unsqueeze(1) * .0001))  # [W, M]
+
+    refund_smmV = torch.zeros((W, M))  # [W, M]
+    smmV = ntlcf.cpr2smm(torch.tensor([[.35, 0]]).repeat(W, 1))  # [W, M]
+    dqV = torch.tensor([[.001, 0]]).repeat(W, 1)  # [W, M]
+    mdrV = torch.tensor([[.03, 0]]).repeat(W, 1)  # [W, M]
+    sevV = torch.vstack([torch.tensor([.95, .96, .97]), torch.ones(W)]).t()  # [W, M]
+    aggMDR_timingV = torch.tensor([[.5, .3, .1], [.5, .3, .1]]).t()  # [W, M]
+
+    aggMDR = torch.tensor([[.03, 0]])  # [1, M]
+    compIntHC = torch.tensor([[.2, .3]])  # [1, M]
+    servicing_fee = torch.tensor([[.02, 0.01]])  # [1, M]
+    recovery_lag = torch.tensor([[4, 0]])  # [1, M]
+    refund_premium = torch.full((1, M), 1)  # [1, M]
+    dq_adv_prin = torch.full((1, M), 0)  # [1, M]
+    dq_adv_int = torch.full((1, M), 0)  # [1, M]
+
+    config = ntlcf.Config(agg_cf=True)
+    model = ntlcf.LoanAmort()
+    # Results in Class of tensors, all and aggregated
+    result_tensor, agg_tensor = model(
+        config=config, orig_wacV=orig_wacV, wam=wam, pv=pv, rate_redV=rate_redV,
+        refund_smmV=refund_smmV, smmV=smmV, dqV=dqV, mdrV=mdrV, sevV=sevV,
+        aggMDR_timingV=aggMDR_timingV, aggMDR=aggMDR,
+        compIntHC=compIntHC, servicing_fee=servicing_fee,
+        recovery_lag=recovery_lag, refund_premium=refund_premium,
+        dq_adv_prin=dq_adv_prin, dq_adv_int=dq_adv_int
+    )
+
+    yield_input = torch.full((agg_tensor.cfV.shape[0], agg_tensor.cfV.shape[1]), 0.11)
+    aggcalc = ntlcf.Calc(agg_tensor, pv, config)
+    aggpx_result = aggcalc.y2p(yield_input)
+
+
+    A = ntlcf.Tranche(.8 * agg_tensor.cfV[0, 0, :], .12)
+    B = ntlcf.Tranche(.2 * agg_tensor.cfV[0, 0, :])
+
+    tranches = OrderedDict()
+    tranches["A"] = A
+    tranches["B"] = B
+
+    deal = ntlcf.Deal()
+    trancheCalc = deal.waterfall(result_tensor, agg_tensor, tranches)
+
+
 if __name__ == '__main__':
     torch.set_printoptions(linewidth=200)
-    test_ntlcf()
+    test_tranche()

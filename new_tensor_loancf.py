@@ -103,6 +103,67 @@ class ResultTensor:
     totalDefaultV: torch.Tensor
 
 
+@dataclass
+class Tranche:
+    bal: float # bal of percent of deal
+    net: float=0.0 # net coupon
+
+@dataclass
+class Deal:
+    def waterfall(self, collateralCf, collAggCf, tranches):
+        """
+        Args:
+            collateralCf(ResultTensor): result collateral tensors [N, WL, M]
+            collAggCf(ResulTensor): result aggregated collateral tensors [1, WL, M] (loans are aggregated)
+            tranches(OrderedDict): orderded dictionary of Tranche objects
+        Returns:
+            (torch.Tensor): shape [Tv, WL, M]
+                Tv: # of payment components
+                WL: # of payment periods (max wam + max recovery_lag)
+                M: # of scenarios
+        """
+        N, WL, M = collateralCf.cfV.shape
+
+        # keys are payment components, values are location idx in dealCfl result tensor
+        D = {
+            "A_int_due": 0,
+            "A_int": 1,
+            "A_bal": 2,
+            "A_prin_due": 3,
+            "A_prin": 4,
+            "B_int": 5,
+            "A_bbal": 6,
+            "B_bal": 7,
+            "B_writedown": 8,
+            "A_writedown": 9,
+        }
+        dealCfl = torch.zeros((max(D.values()) + 1, WL, M)) # [Tv, WL, M] result tensor
+
+        dealCfl[D["A_bbal"], 0, :] = tranches["A"].bal #setting first bbal
+
+        for m in range(WL):
+            dealCfl[D["A_int_due"], m, :] = dealCfl[D["A_bbal"], m, :] * tranches["A"].net / 12 # bbal * net / 12
+            dealCfl[D["A_int"], m, :] = torch.min(collAggCf.cfV[0, m, :],  dealCfl[D["A_int_due"], m, :]) # min(cfV, int_due)
+            
+            if m+1 < WL: dealCfl[D["A_prin_due"], m, :] = dealCfl[D["A_bbal"], m, :] - (dealCfl[D["A_bbal"], 0, :] / collAggCf.cfV[0, 0, :]) * collAggCf.cfV[0, m+1, :] # bbal - percent of deal * collaggCf
+            dealCfl[D["A_prin"], m, :] = torch.min(collAggCf.cfV[0, m, :] - dealCfl[D["A_int"], m, :], dealCfl[D["A_prin_due"], m, :]) # min(cfV-int, prin_due)
+            dealCfl[D["A_bal"], m, :] = dealCfl[D["A_bbal"], m, :] - dealCfl[D["A_prin"], m, :] # bbal - prin
+
+            dealCfl[D["B_int"], m, :] = torch.max(collAggCf.cfV[0, m, :] - dealCfl[D["A_int"], m, :] - dealCfl[D["A_prin"], m, :], torch.zeros(M)) # max(0, cfV - A_int - A_prin)
+            if m+1 < WL: dealCfl[D["A_bbal"], m+1, :] = dealCfl[D["A_bal"], m, :]
+            dealCfl[D["B_bal"], m, :] = collAggCf.cfV[0, m, :] - dealCfl[D["A_bal"], m, :]
+            
+            if m-1 >= 0: 
+                writedown = torch.clamp(collAggCf.cfV[0, m-1, :] - collAggCf.cfV[0, m, :] - dealCfl[D["A_int"], m, :] - dealCfl[D["A_prin"], m, :], min=0.0)
+                writedown_to_B = torch.min(writedown, dealCfl[D["B_bal"], m, :])
+                writedown_to_A = writedown - writedown_to_B
+
+                dealCfl[D["B_writedown"], m, :] = writedown_to_B
+                dealCfl[D["A_writedown"], m, :] = writedown_to_A
+        
+        return dealCfl # [Tv, WL, M]
+
+
 class LoanAmort(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -257,14 +318,15 @@ class Calc():
 
     def y2p(self, y):
         N, WL, M = self.result_tensor.cfV.shape
-        yV = (1 + y/12)**torch.arange(1, WL + 1) # [N, WL]
+        yV = ((1 + y/12)**torch.arange(1, WL + 1)).unsqueeze(2) # [N, WL, 1]
+        
         if self.config.agg_cf and self.config.mode != "matched" and N == 1:
             pv = torch.sum(self.pv).expand(N, 1, M) # [1, 1, M]
         elif self.config.mode == "matched":
             pv = self.pv.reshape(N, 1, 1) # [N, 1, 1]
         else:
             pv = self.pv.unsqueeze(1).expand(N, 1, M) # [N, 1, M]
-        px = torch.sum((self.result_tensor.cfV - self.result_tensor.servicingFeeV) / yV.unsqueeze(2), dim=1, keepdim=True) / (pv - torch.sum(self.result_tensor.refundPrinV / yV.unsqueeze(2), dim=1, keepdim=True)) # [N, 1, M]
+        px = torch.sum((self.result_tensor.cfV - self.result_tensor.servicingFeeV) / yV, dim=1, keepdim=True) / (pv - torch.sum(self.result_tensor.refundPrinV / yV, dim=1, keepdim=True)) # [N, 1, M]
         return px # [N, 1, M] price tensor
     
     def p2y(self, px, y_init=0.8):
